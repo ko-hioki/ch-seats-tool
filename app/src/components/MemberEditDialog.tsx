@@ -11,24 +11,29 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { compressIconImage } from '@/lib/image';
-import type { Member } from '@/lib/model';
+import type { Division, Member, MemberStatus } from '@/lib/model';
 
 interface MemberForm {
   name: string;
   nickname: string;
+  division: string;
   department: string;
+  email: string;
+  status: MemberStatus;
   icon: string | null;
   slackUserId: string;
   note: string;
 }
 
-type MemberFormTextField = Exclude<keyof MemberForm, 'icon'>;
+type MemberFormTextField = Exclude<keyof MemberForm, 'icon' | 'status'>;
 
 interface MemberEditDialogProps {
   open: boolean;
   member: Member | null;
+  divisions: Division[];
   onClose: () => void;
   onSave: (attrs: Partial<Member>) => void;
   onDelete: (id: string) => void;
@@ -41,6 +46,7 @@ interface MemberEditDialogProps {
 export default function MemberEditDialog({
   open,
   member,
+  divisions,
   onClose,
   onSave,
   onDelete,
@@ -54,7 +60,10 @@ export default function MemberEditDialog({
       setForm({
         name: member?.name ?? '',
         nickname: member?.nickname ?? '',
+        division: member?.division ?? '',
         department: member?.department ?? '',
+        email: member?.email ?? '',
+        status: member?.status ?? 'active',
         icon: member?.icon ?? null,
         slackUserId: member?.slackUserId ?? '',
         note: member?.note ?? '',
@@ -81,16 +90,20 @@ export default function MemberEditDialog({
     }
   }
 
+  const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form?.email.trim() ?? '');
+
   function handleSave() {
     if (!form!.name.trim() && !form!.nickname.trim()) {
       alert('本名またはあだ名を入力してください');
       return;
     }
+    if (!isEmailValid) return;
     onSave({
       ...form!,
       name: form!.name.trim(),
       nickname: form!.nickname.trim(),
       department: form!.department.trim(),
+      email: form!.email.trim(),
       slackUserId: form!.slackUserId.trim() || null,
     });
   }
@@ -109,16 +122,81 @@ export default function MemberEditDialog({
               <Input value={form.name} onChange={set('name')} placeholder="山田 太郎" />
             </div>
             <div className="grid gap-1.5">
-              <Label>あだ名 (表示名)</Label>
-              <Input value={form.nickname} onChange={set('nickname')} placeholder="やまちゃん" />
+              <Label>あだ名</Label>
+              <Input value={form.nickname} onChange={set('nickname')} placeholder="表示名(ニックネーム)" />
             </div>
           </div>
           <div className="grid gap-1.5">
-            <Label>所属 (部署/チーム)</Label>
-            <Input value={form.department} onChange={set('department')} placeholder="開発部" />
+            <Label>事業部</Label>
+            <Select
+              value={form.division}
+              onChange={(e) => setForm((f) => ({ ...f!, division: e.target.value }))}
+            >
+              <option value="">(未設定)</option>
+              {divisions.map((d) => (
+                <option key={d.code} value={d.code}>
+                  {d.label}
+                </option>
+              ))}
+              {form.division && !divisions.some((d) => d.code === form.division) ? (
+                // リストから削除済みの事業部コードが設定されている場合もコードのまま保持する
+                <option value={form.division}>{form.division} (リストに無いコード)</option>
+              ) : null}
+            </Select>
+            {divisions.length === 0 ? (
+              <p className="text-xs text-muted-foreground">「設定」から事業部リストを登録できます</p>
+            ) : null}
           </div>
           <div className="grid gap-1.5">
-            <Label>アイコン画像 (任意)</Label>
+            <Label>部署</Label>
+            <Input value={form.department} onChange={set('department')} placeholder="課・チームなど" />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>メールアドレス *</Label>
+            <Input
+              type="email"
+              value={form.email}
+              onChange={set('email')}
+              placeholder="yamada-taro@example.com"
+            />
+            {!isEmailValid ? (
+              <p className="text-xs text-destructive">有効なメールアドレスを入力してください</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                「名簿から同期」はこのメールアドレスで本人を照合します。
+              </p>
+            )}
+          </div>
+          <div className="grid gap-1.5">
+            <Label>在籍状態</Label>
+            <div className="flex gap-3 text-sm">
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  name="member-status"
+                  checked={form.status === 'active'}
+                  onChange={() => setForm((f) => ({ ...f!, status: 'active' }))}
+                />
+                在籍
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  name="member-status"
+                  checked={form.status === 'retired'}
+                  onChange={() => setForm((f) => ({ ...f!, status: 'retired' }))}
+                />
+                退職
+              </label>
+            </div>
+            {form.status === 'retired' ? (
+              <p className="text-xs text-muted-foreground">
+                退職メンバーは台帳一覧でデフォルト非表示になり、席に紐付いたままの場合は警告表示されます。
+              </p>
+            ) : null}
+          </div>
+          <div className="grid gap-1.5">
+            <Label>アイコン画像</Label>
             <div className="flex items-center gap-2">
               {form.icon ? (
                 <img src={form.icon} alt="" className="h-12 w-12 rounded-full object-cover" />
@@ -181,7 +259,7 @@ export default function MemberEditDialog({
           <Button variant="outline" onClick={onClose}>
             キャンセル
           </Button>
-          <Button onClick={handleSave}>{isNew ? '追加' : '保存'}</Button>
+          <Button onClick={handleSave} disabled={!isEmailValid}>{isNew ? '追加' : '保存'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

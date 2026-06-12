@@ -2,6 +2,7 @@ import { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Minus, Maximize } from 'lucide-react';
 import {
   BLANK_CANVAS,
+  memberColorKey,
   seatDisplayName,
   type Location,
   type Member,
@@ -66,9 +67,18 @@ function SeatNode({
   nameMode,
 }: SeatNodeProps) {
   const displayName = seatDisplayName(seat, member, nameMode);
+  // 退職メンバーが席に紐付いたまま: 警告色の枠 + 名前に取り消し線で注意喚起
+  const retired = member?.status === 'retired';
   let style: SeatStyle;
-  if (member) {
-    const c = departmentColor(colorMap, member.department);
+  if (retired) {
+    style = {
+      background: '#fef2f2',
+      borderColor: '#dc2626',
+      borderStyle: 'dashed',
+      color: '#b91c1c',
+    };
+  } else if (member) {
+    const c = departmentColor(colorMap, memberColorKey(member));
     style = {
       background: c.bg,
       borderColor: c.border,
@@ -122,8 +132,12 @@ function SeatNode({
         </div>
       ) : null}
       <div
-        className="font-bold leading-tight text-center pointer-events-none max-w-full truncate px-0.5"
+        className={cn(
+          'font-bold leading-tight text-center pointer-events-none max-w-full truncate px-0.5',
+          retired && 'line-through'
+        )}
         style={{ fontSize, color: style.color }}
+        title={retired ? '退職メンバーが紐付いたままの席です' : undefined}
       >
         {displayName || (seat.type === 'meeting' ? '会議席' : '空席')}
       </div>

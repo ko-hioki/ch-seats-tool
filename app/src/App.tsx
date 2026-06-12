@@ -14,6 +14,7 @@ import {
   ListOrdered,
   SquareDashed,
   LayoutGrid,
+  Settings,
   Users,
   X,
 } from 'lucide-react';
@@ -25,9 +26,13 @@ import {
   createSeat,
   createZone,
   uid,
+  divisionLabel,
+  memberColorKey,
   BLANK_CANVAS,
   SEAT_TEMPLATES,
+  createDefaultSettings,
   type AppData,
+  type Division,
   type Location,
   type Member,
   type NameMode,
@@ -57,11 +62,12 @@ import MemberPanel, { type DragGhost } from '@/components/MemberPanel';
 import MemberEditDialog from '@/components/MemberEditDialog';
 import ProfileEditDialog from '@/components/ProfileEditDialog';
 import SeatDetailPopover from '@/components/SeatDetailPopover';
-import CsvImportDialog from '@/components/CsvImportDialog';
 import DataIODialog from '@/components/DataIODialog';
 import LocationManagerDialog from '@/components/LocationManagerDialog';
 import MemberLinkDialog from '@/components/MemberLinkDialog';
 import NameFlowDialog, { type FlowEntry } from '@/components/NameFlowDialog';
+import SettingsDialog from '@/components/SettingsDialog';
+import RosterSyncDialog, { type RosterSyncResult } from '@/components/RosterSyncDialog';
 
 const POLL_INTERVAL_MS = 30000;
 const UNDO_LIMIT = 50;
@@ -193,7 +199,8 @@ export default function App() {
   const [popover, setPopover] = useState<PopoverState | null>(null); // {seatId, x, y}
   const [profileMemberId, setProfileMemberId] = useState<string | null>(null);
   const [memberDialog, setMemberDialog] = useState<{ member: Member | null } | null>(null); // {member: Member|null}
-  const [csvOpen, setCsvOpen] = useState(false);
+  const [rosterSyncOpen, setRosterSyncOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [dataIOOpen, setDataIOOpen] = useState(false);
   const [locManagerOpen, setLocManagerOpen] = useState(false);
   const [dragGhost, setDragGhost] = useState<DragGhost | null>(null); // {member, x, y}
@@ -354,8 +361,11 @@ export default function App() {
     () => new Map((data?.members ?? []).map((m) => [m.id, m])),
     [data]
   );
+  // 事業部リスト (セッションデータの設定。設定ダイアログで編集可能)
+  const divisions = data?.settings?.divisions ?? [];
+  // 色分けキー: 事業部 (設定時) → 部署 (フォールバック)
   const colorMap = useMemo(
-    () => buildDepartmentColorMap((data?.members ?? []).map((m) => m.department)),
+    () => buildDepartmentColorMap((data?.members ?? []).map((m) => memberColorKey(m))),
     [data]
   );
   const locationSeats = useMemo(
@@ -389,6 +399,9 @@ export default function App() {
         if (
           (m.name ?? '').toLowerCase().includes(q) ||
           (m.nickname ?? '').toLowerCase().includes(q) ||
+          // 事業部は名称・コードのどちらでもヒット
+          divisionLabel(divisions, m.division).toLowerCase().includes(q) ||
+          (m.division ?? '').toLowerCase().includes(q) ||
           (m.department ?? '').toLowerCase().includes(q)
         ) {
           ids.add(s.id);
@@ -399,7 +412,7 @@ export default function App() {
       }
     }
     return ids;
-  }, [search, locationSeats, memberById]);
+  }, [search, locationSeats, memberById, divisions]);
 
   // ---- データ変更 (ローカル。保存ボタンでサーバーへ) ----
   // opts.coalesceKey: 直前の push と同じキーなら履歴を積まない (ドラッグ移動の集約用)
@@ -1396,6 +1409,38 @@ export default function App() {
     showToast(`${list.length} 件のメンバーを取り込みました。「保存」で確定してください。`);
   };
 
+  // 事業部リストの設定保存 (セッションデータ側に持つ。組織変更で zip 再アップ不要)
+  const saveDivisions = (next: Division[]) => {
+    mutate((d) => ({ ...d, settings: { ...d.settings, divisions: next } }));
+    setSettingsOpen(false);
+    showToast('事業部リストを更新しました。「保存」で確定してください。');
+  };
+
+  // 名簿同期の適用 (新規追加・名簿由来フィールドの更新・退職化を 1 mutate = Undo 1 回で)
+  const applyRosterSync = (result: RosterSyncResult) => {
+    const { added, updates, retireIds } = result;
+    setRosterSyncOpen(false);
+    if (!added.length && !updates.length && !retireIds.length) {
+      showToast('名簿との差分はありませんでした。');
+      return;
+    }
+    const patchById = new Map(updates.map((u) => [u.id, u.patch]));
+    const retire = new Set(retireIds);
+    mutate((d) => ({
+      ...d,
+      members: [
+        ...d.members.map((m) => {
+          const patched = patchById.has(m.id) ? { ...m, ...patchById.get(m.id) } : m;
+          return retire.has(m.id) ? { ...patched, status: 'retired' as const } : patched;
+        }),
+        ...added.map((attrs) => createMember(attrs)),
+      ],
+    }));
+    showToast(
+      `名簿同期: 新規 ${added.length} 名 / 更新 ${updates.length} 名 / 退職 ${retireIds.length} 名を反映しました。「保存」で確定してください。`
+    );
+  };
+
   const handleMemberSave = (attrs: Partial<Member>) => {
     const editing = memberDialog?.member;
     if (editing) {
@@ -1618,7 +1663,7 @@ export default function App() {
               <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 className="h-8 w-44 pl-7 sm:w-56"
-                placeholder="名前・部署で検索"
+                placeholder="名前・事業部・部署で検索"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -1650,6 +1695,14 @@ export default function App() {
               </>
             ) : (
               <>
+                <Button
+                  variant="outline"
+                  size="iconSm"
+                  onClick={() => setSettingsOpen(true)}
+                  title="設定 (事業部リストの編集)"
+                >
+                  <Settings />
+                </Button>
                 <Button
                   variant="outline"
                   size="iconSm"
@@ -2045,12 +2098,13 @@ export default function App() {
             members={data.members}
             seats={data.seats}
             locations={sortedLocations}
+            divisions={divisions}
             colorMap={colorMap}
             onDragState={setDragGhost}
             onDropMember={dropMemberOnSeat}
             onEditMember={(m) => setMemberDialog({ member: m })}
             onAddMember={() => setMemberDialog({ member: null })}
-            onOpenCsvImport={() => setCsvOpen(true)}
+            onOpenRosterSync={() => setRosterSyncOpen(true)}
             onClose={() => setMemberPanelOpen(false)}
           />
         ) : null}
@@ -2077,6 +2131,7 @@ export default function App() {
           anchor={{ x: popover!.x, y: popover!.y }}
           seat={popoverSeat}
           member={popoverMember}
+          divisions={divisions}
           colorMap={colorMap}
           onClose={() => setPopover(null)}
           onEditProfile={(m) => {
@@ -2111,6 +2166,7 @@ export default function App() {
       <MemberEditDialog
         open={!!memberDialog}
         member={memberDialog?.member ?? null}
+        divisions={divisions}
         onClose={() => setMemberDialog(null)}
         onSave={handleMemberSave}
         onDelete={handleMemberDelete}
@@ -2118,14 +2174,9 @@ export default function App() {
       <ProfileEditDialog
         open={!!profileMember}
         member={profileMember}
+        divisions={divisions}
         onClose={() => setProfileMemberId(null)}
         onSave={handleProfileSave}
-      />
-      <CsvImportDialog
-        open={csvOpen}
-        onClose={() => setCsvOpen(false)}
-        onImport={importMembers}
-        existingNames={(data?.members ?? []).map((m) => m.name)}
       />
       <DataIODialog
         open={dataIOOpen}
@@ -2153,10 +2204,26 @@ export default function App() {
         open={!!linkSeatId}
         seat={data?.seats.find((s) => s.id === linkSeatId) ?? null}
         members={data?.members ?? []}
+        divisions={divisions}
         colorMap={colorMap}
         onClose={() => setLinkSeatId(null)}
         onLink={(memberId) => linkMemberToSeat(linkSeatId!, memberId)}
         onRegisterAndLink={(name) => registerAndLinkMember(linkSeatId!, name)}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        divisions={divisions}
+        members={data?.members ?? []}
+        onClose={() => setSettingsOpen(false)}
+        onSave={saveDivisions}
+      />
+      <RosterSyncDialog
+        open={rosterSyncOpen}
+        members={data?.members ?? []}
+        divisions={divisions}
+        existingNames={(data?.members ?? []).map((m) => m.name)}
+        onClose={() => setRosterSyncOpen(false)}
+        onApply={applyRosterSync}
       />
 
       {/* 保存競合ダイアログ */}

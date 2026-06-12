@@ -1,6 +1,6 @@
 # zaproom Session Datastore リファレンス
 
-> 出典: https://zaproom.kayac.com/tools/57e4G83WDGEM (Session Datastore Kitchen Sink) 2026-06-11 取得
+> 出典: zaproom 公式ドキュメントツール「Session Datastore Kitchen Sink」(zaproom 上で公開されている) 2026-06-11 取得
 
 zaproom ツールにサーバー側のデータ保存・共有機能を追加する仕組み。セッション URL を共有するだけで、複数人がリアルタイムに同じデータを読み書きできる。
 
@@ -18,7 +18,7 @@ zaproom ツールにサーバー側のデータ保存・共有機能を追加す
 - `write_scope: "author-only"` — セッション作成者のみ書き込み可(デフォルト)
 - `write_scope: "internal"` — 組織メンバー全員が書き込み可
 - manifest.json の配列は「セッション作成時にユーザーが選べる選択肢」を定義する(セッション自体の設定ではない)
-- 別途メールアドレス指定の ACL 機能もある(2026-06-09 リリース、#club-zaproom 告知参照)
+- 別途メールアドレス指定の ACL 機能もある(2026-06-09 リリース)
 
 ## manifest.json (zip のトップレベルに配置)
 

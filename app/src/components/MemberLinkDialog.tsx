@@ -10,12 +10,20 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { departmentColor, type DepartmentColor } from '@/lib/colors';
-import type { Member, Seat } from '@/lib/model';
+import {
+  divisionLabel,
+  memberAffiliationLabel,
+  memberColorKey,
+  type Division,
+  type Member,
+  type Seat,
+} from '@/lib/model';
 
 interface MemberLinkDialogProps {
   open: boolean;
   seat: Seat | null;
   members: Member[];
+  divisions: Division[];
   colorMap: Map<string, DepartmentColor>;
   onClose: () => void;
   onLink: (memberId: string) => void;
@@ -31,6 +39,7 @@ export default function MemberLinkDialog({
   open,
   seat,
   members,
+  divisions,
   colorMap,
   onClose,
   onLink,
@@ -42,17 +51,20 @@ export default function MemberLinkDialog({
     const q = filter.trim().toLowerCase();
     const sorted = [...members].sort(
       (a, b) =>
-        (a.department || '').localeCompare(b.department || '', 'ja') ||
-        (a.name || '').localeCompare(b.name || '', 'ja')
+        memberAffiliationLabel(divisions, a).localeCompare(
+          memberAffiliationLabel(divisions, b),
+          'ja'
+        ) || (a.name || '').localeCompare(b.name || '', 'ja')
     );
     if (!q) return sorted;
     return sorted.filter(
       (m) =>
         m.name?.toLowerCase().includes(q) ||
         m.nickname?.toLowerCase().includes(q) ||
+        divisionLabel(divisions, m.division).toLowerCase().includes(q) ||
         m.department?.toLowerCase().includes(q)
     );
-  }, [members, filter]);
+  }, [members, divisions, filter]);
 
   if (!seat) return null;
   const seatName = (seat.name ?? '').trim();
@@ -78,7 +90,7 @@ export default function MemberLinkDialog({
         ) : null}
 
         <Input
-          placeholder="名前・部署で絞り込み"
+          placeholder="名前・事業部・部署で絞り込み"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           className="h-8"
@@ -86,7 +98,8 @@ export default function MemberLinkDialog({
 
         <div className="max-h-72 space-y-1 overflow-y-auto">
           {list.map((m) => {
-            const c = departmentColor(colorMap, m.department);
+            const c = departmentColor(colorMap, memberColorKey(m));
+            const affiliation = memberAffiliationLabel(divisions, m);
             return (
               <button
                 key={m.id}
@@ -111,8 +124,8 @@ export default function MemberLinkDialog({
                       <span className="ml-1 text-xs font-normal text-muted-foreground">({m.name})</span>
                     ) : null}
                   </span>
-                  {m.department ? (
-                    <span className="block truncate text-xs text-muted-foreground">{m.department}</span>
+                  {affiliation ? (
+                    <span className="block truncate text-xs text-muted-foreground">{affiliation}</span>
                   ) : null}
                 </span>
                 <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />

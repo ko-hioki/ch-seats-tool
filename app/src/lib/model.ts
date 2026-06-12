@@ -13,8 +13,24 @@ export interface AppData {
   seats: Seat[];
   /** エリア (ゾーン)。2026-06-11 追加。欠損時は [] として正規化 (後方互換) */
   zones: Zone[];
+  /** セッションごとの設定 (事業部リスト等)。2026-06-12 追加。欠損時はデフォルトで補完 (後方互換) */
+  settings: AppSettings;
   /** ISO8601 */
   updatedAt: string;
+}
+
+/** 事業部 (コード保存・名称表示)。リストはセッションデータの settings.divisions で編集可能 */
+export interface Division {
+  code: string;
+  label: string;
+}
+
+/**
+ * セッションごとの設定。ツール本体 (zip) は社内の誰でもダウンロードできるため、
+ * 組織固有のリスト (事業部等) はコードに埋め込まず、セッションデータ側で編集できるようにする。
+ */
+export interface AppSettings {
+  divisions: Division[];
 }
 
 export interface Location {
@@ -29,14 +45,23 @@ export interface Location {
   seatScale: number;
 }
 
+/** 在籍状態 (2026-06-12 追加。欠損時は 'active' として正規化) */
+export type MemberStatus = 'active' | 'retired';
+
 export interface Member {
   id: string;
   /** 本名 */
   name: string;
   /** あだ名 (表示名) */
   nickname: string;
-  /** 部署/チーム (色分けキー) */
+  /** 事業部コード (settings.divisions のコード。'' = 未設定。2026-06-12 追加。欠損時は '' として正規化) */
+  division: string;
+  /** 部署 (課・チームなど、自由入力) */
   department: string;
+  /** メールアドレス (名簿同期のキー。'' = 未設定。2026-06-12 追加。欠損時は '' として正規化) */
+  email: string;
+  /** 在籍状態 ('retired' は一覧からデフォルト非表示・席に警告表示。2026-06-12 追加) */
+  status: MemberStatus;
   /** 小さく縮小したアイコン (dataURL) */
   icon: string | null;
   /** Slack DM リンク用 (任意) */
@@ -108,6 +133,7 @@ export function createEmptyData(): AppData {
     members: [],
     seats: [],
     zones: [],
+    settings: createDefaultSettings(),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -129,12 +155,79 @@ export function createMember(attrs: Partial<Member> = {}): Member {
     id: uid(),
     name: '',
     nickname: '',
+    division: '',
     department: '',
+    email: '',
+    status: 'active',
     icon: null,
     slackUserId: null,
     note: '',
     ...attrs,
   };
+}
+
+// ---- 事業部 (2026-06-12 追加) ----
+// Member.division にはコードを保存し、表示には名称 (label) を使う。'' = 未設定。
+// リスト本体はセッションデータの settings.divisions に保存し、設定ダイアログで編集できる
+// (組織変更があっても zip の再アップロードが不要)。
+
+/** デフォルト設定 (旧データの補完・新規セッション用)。事業部リストは空配列 */
+export function createDefaultSettings(): AppSettings {
+  return { divisions: [] };
+}
+
+/**
+ * 事業部コード → 名称。'' (未設定) は ''。
+ * リストに無いコード (削除済みの事業部等) はコードをそのまま返す (名称解決できなくてもデータは壊さない)。
+ */
+export function divisionLabel(
+  divisions: Division[],
+  code: string | null | undefined
+): string {
+  if (!code) return '';
+  return divisions.find((d) => d.code === code)?.label ?? code;
+}
+
+/**
+ * CSV 取り込み等の文字列から事業部コードを解決する。
+ * divisions が空なら即 '' を返す。
+ * コード完全一致 → 名称完全一致 → 名称部分一致 (一意に決まる場合のみ) の順。
+ * 解決できなければ '' (無理に推測しない)。
+ */
+export function resolveDivisionCode(
+  divisions: Division[],
+  input: string | null | undefined
+): string {
+  if (!divisions || divisions.length === 0) return '';
+  const v = (input ?? '').trim();
+  if (!v) return '';
+  const byCode = divisions.find((d) => d.code === v);
+  if (byCode) return byCode.code;
+  const byLabel = divisions.find((d) => d.label === v);
+  if (byLabel) return byLabel.code;
+  const partial = divisions.filter((d) => d.label.includes(v));
+  if (partial.length === 1) return partial[0].code;
+  return '';
+}
+
+/**
+ * 色分けのグルーピングキー: 事業部 (設定時) → 部署 (フォールバック)。
+ * 事業部はコードをキーにする (名称変更で色が変わらないように)。
+ */
+export function memberColorKey(
+  m: Pick<Member, 'division' | 'department'> | null | undefined
+): string {
+  if (!m) return '';
+  return m.division || m.department || '';
+}
+
+/** 所属の表示文字列: 事業部名称 (+部署があれば併記)。両方無ければ '' */
+export function memberAffiliationLabel(
+  divisions: Division[],
+  m: Pick<Member, 'division' | 'department'> | null | undefined
+): string {
+  if (!m) return '';
+  return [divisionLabel(divisions, m.division), m.department].filter(Boolean).join(' / ');
 }
 
 export function createSeat(
@@ -277,17 +370,31 @@ export const BLANK_CANVAS = { width: 1600, height: 1200 };
  */
 export function normalizeData(raw: unknown): AppData {
   const r = raw as
-    | (Omit<Partial<AppData>, 'locations' | 'members' | 'seats' | 'zones'> & {
+    | (Omit<Partial<AppData>, 'locations' | 'members' | 'seats' | 'zones' | 'settings'> & {
         locations?: Partial<Location>[];
         members?: Partial<Member>[];
         seats?: Partial<Seat>[];
         zones?: Partial<Zone>[];
+        settings?: { divisions?: Partial<Division>[] } | null;
       })
     | null
     | undefined;
   if (!r || typeof r !== 'object' || !Array.isArray(r.locations)) {
     return createEmptyData();
   }
+  // 後方互換: 設定 (事業部リスト) は旧データに無い (2026-06-12 追加) → 空配列で補完。
+  // 配列が存在する場合は空でも尊重する (全削除も編集者の意図とみなす)
+  const rawDivisions = Array.isArray(r.settings?.divisions)
+    ? r.settings.divisions
+        .filter((d) => d && typeof d.code === 'string' && d.code.trim() !== '')
+        .map((d) => ({
+          code: (d.code as string).trim(),
+          label:
+            typeof d.label === 'string' && d.label.trim() !== ''
+              ? d.label.trim()
+              : (d.code as string).trim(),
+        }))
+    : null;
   return {
     version: r.version ?? DATA_VERSION,
     locations: r.locations.map((l, i) => ({
@@ -300,7 +407,16 @@ export function normalizeData(raw: unknown): AppData {
       // 後方互換: 席サイズ倍率 (旧データには無い)
       seatScale: l.seatScale ?? 1,
     })),
-    members: (r.members ?? []).map((m) => createMember(m)),
+    members: (r.members ?? []).map((m) =>
+      // 後方互換: 事業部 (division)・メール (email)・在籍状態 (status) は
+      // 旧データに無い (2026-06-12 追加) → ''/'active'
+      createMember({
+        ...m,
+        division: typeof m.division === 'string' ? m.division : '',
+        email: typeof m.email === 'string' ? m.email : '',
+        status: m.status === 'retired' ? 'retired' : 'active',
+      })
+    ),
     seats: (r.seats ?? []).map((s) => ({
       id: s.id ?? uid(),
       locationId: s.locationId as string,
@@ -327,6 +443,7 @@ export function normalizeData(raw: unknown): AppData {
       color: typeof z.color === 'string' && z.color ? z.color : 'blue',
       label: typeof z.label === 'string' ? z.label : '',
     })),
+    settings: { divisions: rawDivisions ?? createDefaultSettings().divisions },
     updatedAt: r.updatedAt ?? new Date().toISOString(),
   };
 }

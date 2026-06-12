@@ -11,12 +11,15 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { compressIconImage } from '@/lib/image';
-import type { Member } from '@/lib/model';
+import type { Division, Member } from '@/lib/model';
 
 interface ProfileForm {
   nickname: string;
+  division: string;
+  department: string;
   icon: string | null;
   slackUserId: string;
   note: string;
@@ -25,6 +28,7 @@ interface ProfileForm {
 interface ProfileEditDialogProps {
   open: boolean;
   member: Member | null | undefined;
+  divisions: Division[];
   onClose: () => void;
   onSave: (memberId: string, fields: Partial<Member>) => Promise<void>;
 }
@@ -34,7 +38,7 @@ interface ProfileEditDialogProps {
  * 本人があだ名・アイコン・Slack 情報・メモをその場で更新して即保存する
  * (saveWithRetry によりサーバーの最新データへマージ保存)。
  */
-export default function ProfileEditDialog({ open, member, onClose, onSave }: ProfileEditDialogProps) {
+export default function ProfileEditDialog({ open, member, divisions, onClose, onSave }: ProfileEditDialogProps) {
   const [form, setForm] = useState<ProfileForm | null>(null);
   const [saving, setSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -43,6 +47,8 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }: Pro
     if (open && member) {
       setForm({
         nickname: member.nickname ?? '',
+        division: member.division ?? '',
+        department: member.department ?? '',
         icon: member.icon ?? null,
         slackUserId: member.slackUserId ?? '',
         note: member.note ?? '',
@@ -70,6 +76,8 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }: Pro
     try {
       await onSave(member!.id, {
         nickname: form!.nickname.trim(),
+        division: form!.division,
+        department: form!.department.trim(),
         icon: form!.icon,
         slackUserId: form!.slackUserId.trim() || null,
         note: form!.note,
@@ -93,11 +101,39 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }: Pro
         </DialogHeader>
         <div className="grid gap-3">
           <div className="grid gap-1.5">
-            <Label>あだ名 (座席表に表示される名前)</Label>
+            <Label>あだ名</Label>
             <Input
               value={form.nickname}
               onChange={(e) => setForm((f) => ({ ...f!, nickname: e.target.value }))}
-              placeholder={member.name}
+              placeholder={member.name || '座席表に表示される名前'}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>事業部</Label>
+            <Select
+              value={form.division}
+              onChange={(e) => setForm((f) => ({ ...f!, division: e.target.value }))}
+            >
+              <option value="">(未設定)</option>
+              {divisions.map((d) => (
+                <option key={d.code} value={d.code}>
+                  {d.label}
+                </option>
+              ))}
+              {form.division && !divisions.some((d) => d.code === form.division) ? (
+                <option value={form.division}>{form.division} (リストに無いコード)</option>
+              ) : null}
+            </Select>
+            {divisions.length === 0 ? (
+              <p className="text-xs text-muted-foreground">「設定」から事業部リストを登録できます</p>
+            ) : null}
+          </div>
+          <div className="grid gap-1.5">
+            <Label>部署</Label>
+            <Input
+              value={form.department}
+              onChange={(e) => setForm((f) => ({ ...f!, department: e.target.value }))}
+              placeholder="課・チームなど"
             />
           </div>
           <div className="grid gap-1.5">

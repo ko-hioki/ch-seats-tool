@@ -2,7 +2,14 @@ import { ExternalLink, Pencil, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { departmentColor, type DepartmentColor } from '@/lib/colors';
-import { seatTypeLabel, type Member, type Seat } from '@/lib/model';
+import {
+  memberAffiliationLabel,
+  memberColorKey,
+  seatTypeLabel,
+  type Division,
+  type Member,
+  type Seat,
+} from '@/lib/model';
 
 const CARD_W = 280;
 const CARD_H = 260;
@@ -11,6 +18,7 @@ interface SeatDetailPopoverProps {
   anchor: { x: number; y: number };
   seat: Seat | null;
   member: Member | null | undefined;
+  divisions: Division[];
   colorMap: Map<string, DepartmentColor>;
   onClose: () => void;
   onEditProfile: (member: Member) => void;
@@ -24,6 +32,7 @@ export default function SeatDetailPopover({
   anchor,
   seat,
   member,
+  divisions,
   colorMap,
   onClose,
   onEditProfile,
@@ -32,7 +41,8 @@ export default function SeatDetailPopover({
 
   const left = Math.max(8, Math.min(anchor.x + 12, window.innerWidth - CARD_W - 8));
   const top = Math.max(8, Math.min(anchor.y + 12, window.innerHeight - CARD_H - 8));
-  const c = member ? departmentColor(colorMap, member.department) : null;
+  const c = member ? departmentColor(colorMap, memberColorKey(member)) : null;
+  const affiliation = member ? memberAffiliationLabel(divisions, member) : '';
 
   return (
     <div
@@ -51,6 +61,11 @@ export default function SeatDetailPopover({
       <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
         {seat.label ? <span className="font-mono">{seat.label}</span> : null}
         <Badge variant="secondary">{seatTypeLabel(seat.type)}</Badge>
+        {member?.status === 'retired' ? (
+          <Badge variant="outline" className="border-red-300 bg-red-50 text-red-700">
+            退職
+          </Badge>
+        ) : null}
       </div>
 
       {member ? (
@@ -73,13 +88,13 @@ export default function SeatDetailPopover({
               ) : null}
             </div>
           </div>
-          {member.department ? (
+          {affiliation ? (
             <div>
               <span
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium"
                 style={{ background: c!.bg, color: c!.text, border: `1px solid ${c!.border}` }}
               >
-                {member.department}
+                {affiliation}
               </span>
             </div>
           ) : null}

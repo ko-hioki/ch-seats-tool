@@ -1,10 +1,18 @@
 import { useMemo, useState } from 'react';
-import { Pencil, Plus, FileSpreadsheet, GripVertical, X } from 'lucide-react';
+import { Pencil, Plus, GripVertical, RefreshCcw, X, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { departmentColor, type DepartmentColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
-import type { Location, Member, Seat } from '@/lib/model';
+import {
+  divisionLabel,
+  memberAffiliationLabel,
+  memberColorKey,
+  type Division,
+  type Location,
+  type Member,
+  type Seat,
+} from '@/lib/model';
 
 export interface DragGhost {
   member: Member;
@@ -15,14 +23,17 @@ export interface DragGhost {
 interface MemberRowProps {
   member: Member;
   seatInfo: string | null | undefined;
+  divisions: Division[];
   colorMap: Map<string, DepartmentColor>;
   onEdit: (member: Member) => void;
   onDragState: (ghost: DragGhost | null) => void;
   onDropMember: (memberId: string, seatId: string) => void;
 }
 
-function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMember }: MemberRowProps) {
-  const c = departmentColor(colorMap, member.department);
+function MemberRow({ member, seatInfo, divisions, colorMap, onEdit, onDragState, onDropMember }: MemberRowProps) {
+  const c = departmentColor(colorMap, memberColorKey(member));
+  const affiliation = memberAffiliationLabel(divisions, member);
+  const retired = member.status === 'retired';
 
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
@@ -77,17 +88,29 @@ function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMemb
         </span>
       )}
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium leading-tight">
-          {member.nickname || member.name}
-          {member.nickname && member.name ? (
-            <span className="ml-1 text-xs font-normal text-muted-foreground">({member.name})</span>
+        <div className={cn('flex items-center gap-1 truncate text-sm font-medium leading-tight', retired && 'line-through opacity-60')}>
+          <span className="truncate">
+            {member.nickname || member.name}
+            {member.nickname && member.name ? (
+              <span className="ml-1 text-xs font-normal text-muted-foreground">({member.name})</span>
+            ) : null}
+          </span>
+          {retired ? (
+            <span className="ml-1 inline-block shrink-0 rounded-full border border-red-300 bg-red-50 px-1.5 text-[10px] font-normal text-red-700">
+              退職
+            </span>
+          ) : null}
+          {!member.email ? (
+            <span title="メール未設定 — 名簿同期の対象外" className="shrink-0">
+              <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+            </span>
           ) : null}
         </div>
         <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          {member.department ? (
+          {affiliation ? (
             <span className="flex items-center gap-1 truncate">
               <span className="inline-block h-2 w-2 rounded-full" style={{ background: c.border }} />
-              {member.department}
+              {affiliation}
             </span>
           ) : null}
           {seatInfo ? <span className="truncate">@ {seatInfo}</span> : null}
@@ -110,12 +133,13 @@ interface MemberPanelProps {
   members: Member[];
   seats: Seat[];
   locations: Location[];
+  divisions: Division[];
   colorMap: Map<string, DepartmentColor>;
   onDragState: (ghost: DragGhost | null) => void;
   onDropMember: (memberId: string, seatId: string) => void;
   onEditMember: (member: Member) => void;
   onAddMember: () => void;
-  onOpenCsvImport: () => void;
+  onOpenRosterSync: () => void;
   onClose: () => void;
 }
 
@@ -129,15 +153,23 @@ export default function MemberPanel({
   members,
   seats,
   locations,
+  divisions,
   colorMap,
   onDragState,
   onDropMember,
   onEditMember,
   onAddMember,
-  onOpenCsvImport,
+  onOpenRosterSync,
   onClose,
 }: MemberPanelProps) {
   const [filter, setFilter] = useState('');
+  // 退職メンバーはデフォルト非表示 (「退職を表示」トグルで表示)
+  const [showRetired, setShowRetired] = useState(false);
+
+  const retiredCount = useMemo(
+    () => members.filter((m) => m.status === 'retired').length,
+    [members]
+  );
 
   const { assigned, unassigned, seatInfoByMemberId } = useMemo(() => {
     const locById = new Map(locations.map((l) => [l.id, l]));
@@ -150,15 +182,17 @@ export default function MemberPanel({
       !q ||
       m.name?.toLowerCase().includes(q) ||
       m.nickname?.toLowerCase().includes(q) ||
+      divisionLabel(divisions, m.division).toLowerCase().includes(q) ||
       m.department?.toLowerCase().includes(q);
     const sorted = [...members].sort((a, b) =>
-      (a.department || '').localeCompare(b.department || '', 'ja') ||
+      memberAffiliationLabel(divisions, a).localeCompare(memberAffiliationLabel(divisions, b), 'ja') ||
       (a.name || '').localeCompare(b.name || '', 'ja')
     );
     const assigned: Member[] = [];
     const unassigned: Member[] = [];
     const seatInfoByMemberId = new Map<string, string>();
     for (const m of sorted) {
+      if (!showRetired && m.status === 'retired') continue;
       if (!match(m)) continue;
       const seat = seatByMember.get(m.id);
       if (seat) {
@@ -170,7 +204,7 @@ export default function MemberPanel({
       }
     }
     return { assigned, unassigned, seatInfoByMemberId };
-  }, [members, seats, locations, filter]);
+  }, [members, seats, locations, divisions, filter, showRetired]);
 
   return (
     <div className="flex h-full w-72 shrink-0 flex-col border-l bg-muted/40 sm:w-80">
@@ -179,26 +213,42 @@ export default function MemberPanel({
           <h2 className="text-sm font-bold">
             メンバー台帳 <span className="font-normal text-muted-foreground">(任意・{members.length}人)</span>
           </h2>
-          <div className="flex gap-1">
-            <Button variant="outline" size="sm" onClick={onOpenCsvImport} title="名簿の貼り付け / CSV 取り込み">
-              <FileSpreadsheet /> 一括登録
-            </Button>
-            <Button size="sm" onClick={onAddMember}>
-              <Plus /> 追加
-            </Button>
-            <Button variant="ghost" size="iconSm" onClick={onClose} title="台帳パネルを閉じる">
-              <X />
-            </Button>
-          </div>
+          <Button variant="ghost" size="iconSm" onClick={onClose} title="台帳パネルを閉じる">
+            <X />
+          </Button>
+        </div>
+        <div className="flex gap-1">
+          <Button size="sm" className="flex-1" onClick={onAddMember}>
+            <Plus /> 追加
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1"
+            onClick={onOpenRosterSync}
+            title="社員名簿 (スプレッドシート) を貼り付けて取り込み / 差分同期"
+          >
+            <RefreshCcw /> 名簿から取り込み / 同期
+          </Button>
         </div>
         <Input
-          placeholder="名前・部署で絞り込み"
+          placeholder="名前・事業部・部署で絞り込み"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           className="h-8"
         />
+        {retiredCount > 0 ? (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showRetired}
+              onChange={(e) => setShowRetired(e.target.checked)}
+            />
+            退職を表示 ({retiredCount}人)
+          </label>
+        ) : null}
         <p className="text-xs text-muted-foreground">
-          台帳は任意機能です (席への名前直接入力だけでも座席表は作れます)。メンバーを座席へドラッグで割り当て、着席中メンバーを別席へドラッグで移動/入れ替え。あだ名・アイコン・部署色分け・Slack リンクを使いたい場合に登録してください。
+          台帳は任意機能です (席への名前直接入力だけでも座席表は作れます)。メンバーを座席へドラッグで割り当て、着席中メンバーを別席へドラッグで移動/入れ替え。あだ名・アイコン・事業部/部署色分け・Slack リンクを使いたい場合に登録してください。
         </p>
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-2.5">
@@ -212,6 +262,7 @@ export default function MemberPanel({
                 key={m.id}
                 member={m}
                 seatInfo={null}
+                divisions={divisions}
                 colorMap={colorMap}
                 onEdit={onEditMember}
                 onDragState={onDragState}
@@ -233,6 +284,7 @@ export default function MemberPanel({
                 key={m.id}
                 member={m}
                 seatInfo={seatInfoByMemberId.get(m.id)}
+                divisions={divisions}
                 colorMap={colorMap}
                 onEdit={onEditMember}
                 onDragState={onDragState}

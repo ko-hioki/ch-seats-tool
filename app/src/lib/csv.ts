@@ -2,7 +2,14 @@
 // タブが含まれていれば TSV、それ以外は CSV として解釈する。
 
 /** 列のマッピング先となる Member のフィールド ('' は不明/取り込まない) */
-export type MemberCsvField = 'name' | 'nickname' | 'department' | 'slackUserId' | 'note';
+export type MemberCsvField =
+  | 'name'
+  | 'nickname'
+  | 'division'
+  | 'department'
+  | 'email'
+  | 'slackUserId'
+  | 'note';
 
 function parseDelimited(text: string, delimiter: string): string[][] {
   const rows: string[][] = [];
@@ -57,10 +64,13 @@ export function parseTable(text: string): string[][] {
 export function guessMapping(header: string[]): (MemberCsvField | '')[] {
   return header.map((h) => {
     const t = (h || '').toLowerCase();
+    // 「Slack表示名」を nickname と誤判定しないよう slack を先に判定
+    if (/slack/.test(t)) return 'slackUserId';
+    if (/メール|mail|email/.test(t)) return 'email';
     if (/本名|氏名|名前|name/.test(t)) return 'name';
     if (/あだ名|ニックネーム|表示名|nickname/.test(t)) return 'nickname';
+    if (/事業部|division/.test(t)) return 'division';
     if (/部署|チーム|所属|department|team/.test(t)) return 'department';
-    if (/slack/.test(t)) return 'slackUserId';
     if (/メモ|備考|note/.test(t)) return 'note';
     return '';
   });
