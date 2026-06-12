@@ -140,9 +140,13 @@ export function createZone(locationId, rect = {}, attrs = {}) {
 /**
  * 座席の表示名を解決する。
  * 優先順: 紐付けメンバーのあだ名/本名 → seat.name (直接入力) → '' (空席)
+ * nameMode: 'nickname' (あだ名優先・デフォルト) | 'real' (本名優先)
  */
-export function seatDisplayName(seat, member) {
-  if (member) return member.nickname || member.name || '';
+export function seatDisplayName(seat, member, nameMode = 'nickname') {
+  if (member) {
+    if (nameMode === 'real') return member.name || member.nickname || '';
+    return member.nickname || member.name || '';
+  }
   return seat?.name ?? '';
 }
 

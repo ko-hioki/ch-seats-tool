@@ -42,6 +42,7 @@ export default function SeatToolbar({
   onOpenLink,
   onAlign,
   onDistribute,
+  onGapAdjust,
   onRotateAll,
   onDuplicateGroup,
   onDeleteAll,
@@ -87,6 +88,25 @@ export default function SeatToolbar({
             onClick={() => onDistribute('y')}
           >
             <AlignVerticalDistributeCenter /> 縦等間隔
+          </Button>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-amber-900">間隔:</span>
+          <Button
+            variant="outline"
+            size="iconSm"
+            title="選択した席同士の余白を狭める"
+            onClick={() => onGapAdjust(1 / 1.1)}
+          >
+            −
+          </Button>
+          <Button
+            variant="outline"
+            size="iconSm"
+            title="選択した席同士の余白を広げる"
+            onClick={() => onGapAdjust(1.1)}
+          >
+            ＋
           </Button>
         </div>
         <Button

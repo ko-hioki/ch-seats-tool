@@ -94,6 +94,25 @@ export default function App() {
   const [conflict, setConflict] = useState(null); // {latestEtag, latestData}
 
   const [mode, setMode] = useState('view');
+  // 表示名モード: あだ名優先 / 本名優先 (閲覧者ごとの好みなのでセッションではなく端末に保存)
+  const [nameMode, setNameMode] = useState(() => {
+    try {
+      return localStorage.getItem('seatNameMode') === 'real' ? 'real' : 'nickname';
+    } catch {
+      return 'nickname';
+    }
+  });
+  const toggleNameMode = () => {
+    setNameMode((m) => {
+      const next = m === 'real' ? 'nickname' : 'real';
+      try {
+        localStorage.setItem('seatNameMode', next);
+      } catch {
+        /* private mode 等では永続化しない */
+      }
+      return next;
+    });
+  };
   const [locationId, setLocationId] = useState(null);
   const [search, setSearch] = useState('');
   const [selectedSeatIds, setSelectedSeatIds] = useState(() => new Set());
@@ -479,7 +498,8 @@ export default function App() {
     setNameEditSeatId(null);
   };
 
-  // 既存座席クリック: 選択 + インライン名前編集を開く
+  // 既存座席のダブルクリック (または単一選択中の Enter): 選択 + インライン名前編集を開く
+  // (シングルクリックは選択のみ。FloorMap 側で onSelectSeat が呼ばれる)
   const handleSeatClick = (seatId) => {
     selectSeat(seatId);
     setNameEditSeatId(seatId);
@@ -977,33 +997,159 @@ export default function App() {
     }
   };
 
-  // 等間隔: 端2席の間を均等配分 (axis: 'x' | 'y')
+  // 席の軸方向の見た目サイズ (px)。回転を考慮した bbox 幅/高さ
+  const seatExtentPx = (s, unit, axis) => {
+    const pw = unit * (s.w ?? 1);
+    const ph = unit * 0.62 * (s.h ?? 1);
+    const rad = (((s.rotation ?? 0) % 360) * Math.PI) / 180;
+    const cos = Math.abs(Math.cos(rad));
+    const sin = Math.abs(Math.sin(rad));
+    return axis === 'x' ? pw * cos + ph * sin : pw * sin + ph * cos;
+  };
+
+  // 等間隔 (axis: 'x' | 'y')。
+  // 全席の中心を均等割りすると 2 次元の島選択で列/行が崩れて席が重なるため、
+  // 同じ列(x)/行(y)の席はクラスタとしてまとめて動かし、
+  // クラスタ間の「余白」(席サイズ・回転込みの端から端) が均等になるよう配分する
   const distributeSeats = (ids, axis) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 3) return;
-    const sorted = [...targets].sort((a, b) => a[axis] - b[axis]);
-    const min = sorted[0][axis];
-    const step = (sorted[sorted.length - 1][axis] - min) / (sorted.length - 1);
-    const pos = new Map(sorted.map((s, i) => [s.id, min + step * i]));
-    mutate((d) => ({
-      ...d,
-      seats: d.seats.map((s) => (set.has(s.id) ? { ...s, [axis]: pos.get(s.id) } : s)),
-    }));
-  };
+    const loc = currentLocation;
+    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
+    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const unit = seatUnit(loc);
+    const D = axis === 'x' ? W : H;
 
-  // 一括回転 (R キー / ツールバーの 90°回転)
-  const rotateSeats = (ids, deg) => {
-    const set = ids instanceof Set ? ids : new Set(ids);
-    if (set.size === 0) return;
+    // 中心座標が近い席を同一クラスタ (列/行) にまとめる
+    const tol = (axis === 'x' ? unit : unit * 0.62) * 0.5;
+    const sorted = [...targets].sort((a, b) => a[axis] - b[axis]);
+    const clusters = [];
+    for (const s of sorted) {
+      const c = s[axis] * D;
+      const last = clusters[clusters.length - 1];
+      if (last && c - last.lastCenter <= tol) {
+        last.seats.push(s);
+        last.lastCenter = c;
+      } else {
+        clusters.push({ seats: [s], lastCenter: c });
+      }
+    }
+    if (clusters.length < 2) return;
+
+    for (const cl of clusters) {
+      const edges = cl.seats.map((s) => {
+        const half = seatExtentPx(s, unit, axis) / 2;
+        const c = s[axis] * D;
+        return [c - half, c + half];
+      });
+      cl.left = Math.min(...edges.map((e) => e[0]));
+      cl.right = Math.max(...edges.map((e) => e[1]));
+      cl.center = (cl.left + cl.right) / 2;
+      cl.size = cl.right - cl.left;
+    }
+
+    const span = clusters[clusters.length - 1].right - clusters[0].left;
+    const sumSize = clusters.reduce((n, c) => n + c.size, 0);
+    // 端は固定して間の余白を均等化。席が収まらない (余白が負になる) 場合は
+    // 最小余白を確保して先頭から並べ直す (くっつき防止)
+    const minGap = unit * 0.08;
+    const gap = Math.max((span - sumSize) / (clusters.length - 1), minGap);
+
+    const delta = new Map();
+    let cursor = clusters[0].left;
+    for (const cl of clusters) {
+      const d = cursor + cl.size / 2 - cl.center;
+      for (const s of cl.seats) delta.set(s.id, d);
+      cursor += cl.size + gap;
+    }
     mutate((d) => ({
       ...d,
       seats: d.seats.map((s) =>
-        set.has(s.id)
-          ? { ...s, rotation: ((((s.rotation ?? 0) + deg) % 360) + 360) % 360 }
+        delta.has(s.id)
+          ? { ...s, [axis]: Math.min(1, Math.max(0, (s[axis] * D + delta.get(s.id)) / D)) }
           : s
       ),
     }));
+  };
+
+  // 机間の余白調整: 選択全体の中心から各席中心までの距離を拡縮する
+  // (連打を 1 Undo ステップに集約するため coalesceKey を使用)
+  const adjustSeatGaps = (ids, factor) => {
+    const set = ids instanceof Set ? ids : new Set(ids);
+    const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
+    if (targets.length < 2) return;
+    const loc = currentLocation;
+    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
+    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const xs = targets.map((s) => s.x * W);
+    const ys = targets.map((s) => s.y * H);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    mutate(
+      (d) => ({
+        ...d,
+        seats: d.seats.map((s) =>
+          set.has(s.id)
+            ? {
+                ...s,
+                x: Math.min(1, Math.max(0, (cx + (s.x * W - cx) * factor) / W)),
+                y: Math.min(1, Math.max(0, (cy + (s.y * H - cy) * factor) / H)),
+              }
+            : s
+        ),
+      }),
+      { coalesceKey: 'gap:' + [...set].sort().join(',') }
+    );
+  };
+
+  // 一括回転 (R キー / ツールバーの 90°回転)。
+  // 2席以上の選択は個別回転ではなく、選択全体を1つの塊として bbox 中心の周りで回す
+  const rotateSeats = (ids, deg) => {
+    const set = ids instanceof Set ? ids : new Set(ids);
+    if (set.size === 0) return;
+    const loc = currentLocation;
+    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
+    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    mutate((d) => {
+      const targets = d.seats.filter((s) => set.has(s.id));
+      let posMap = null;
+      if (targets.length >= 2) {
+        // 相対座標のまま回すと図面の縦横比で歪むため、ピクセル空間で回転する
+        const xs = targets.map((s) => s.x * W);
+        const ys = targets.map((s) => s.y * H);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        const rad = (deg * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        posMap = new Map(
+          targets.map((s) => {
+            const dx = s.x * W - cx;
+            const dy = s.y * H - cy;
+            return [
+              s.id,
+              {
+                x: Math.min(1, Math.max(0, (cx + dx * cos - dy * sin) / W)),
+                y: Math.min(1, Math.max(0, (cy + dx * sin + dy * cos) / H)),
+              },
+            ];
+          })
+        );
+      }
+      return {
+        ...d,
+        seats: d.seats.map((s) =>
+          set.has(s.id)
+            ? {
+                ...s,
+                ...(posMap ? posMap.get(s.id) : null),
+                rotation: ((((s.rotation ?? 0) + deg) % 360) + 360) % 360,
+              }
+            : s
+        ),
+      };
+    });
   };
 
   // 席サイズの手動調整 (拠点ごとの倍率。0.4〜2.0、step 0.1)
@@ -1031,7 +1177,8 @@ export default function App() {
   // キーボードショートカット:
   //   Cmd/Ctrl+Z: Undo (流し込み中は流し込みの1手戻し) / Shift+Cmd/Ctrl+Z: Redo
   //   Cmd/Ctrl+C / V: 選択席のコピー & ペースト (アプリ内クリップボード)
-  //   Delete/Backspace: 選択席をまとめて削除 (Undo があるので confirm 不要)
+  //   Delete/Backspace: 選択席をまとめて削除 (Undo があるので confirm 不要) / 選択エリアを削除 (席とエリアの選択は排他)
+  //   Enter: 単一選択中の席のインライン名前編集を開く (input 等フォーカス中は除外)
   //   R: 選択席を 90° 回転
   //   Esc: 流し込み/クリック配置/エリア描画/テンプレート配置モードを終了 (インライン入力中の Esc は入力側で処理)
   useEffect(() => {
@@ -1063,6 +1210,15 @@ export default function App() {
         if (mode === 'edit' && clipboardRef.current) {
           e.preventDefault();
           pasteSeats();
+        }
+        return;
+      }
+      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        // 単一選択中の席の名前編集を開く (IME 変換確定や入力欄フォーカス中は除外)
+        if (inField || e.isComposing || nameEditSeatId != null) return;
+        if (mode === 'edit' && !flow && tool === 'select' && selectedSeatIds.size === 1) {
+          e.preventDefault();
+          setNameEditSeatId([...selectedSeatIds][0]);
         }
         return;
       }
@@ -1389,6 +1545,14 @@ export default function App() {
             </div>
             {mode === 'view' ? (
               <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleNameMode}
+                  title="座席の名前表示を「あだ名」と「本名」で切り替え (台帳に登録された席のみ)"
+                >
+                  表示: {nameMode === 'real' ? '本名' : 'あだ名'}
+                </Button>
                 <Button variant="outline" size="sm" onClick={handleRefresh} title="最新データを取得">
                   <RefreshCw /> 更新
                 </Button>
@@ -1612,6 +1776,7 @@ export default function App() {
           onOpenLink={(seatId) => setLinkSeatId(seatId)}
           onAlign={(type) => alignSeats(selectedSeatIds, type)}
           onDistribute={(axis) => distributeSeats(selectedSeatIds, axis)}
+          onGapAdjust={(factor) => adjustSeatGaps(selectedSeatIds, factor)}
           onRotateAll={(deg) => rotateSeats(selectedSeatIds, deg)}
           onDuplicateGroup={() => duplicateSeats(selectedSeatIds)}
           onDeleteAll={() => deleteSeats(selectedSeatIds)}
@@ -1732,6 +1897,7 @@ export default function App() {
               memberById={memberById}
               colorMap={colorMap}
               mode={mode}
+              nameMode={nameMode}
               tool={tool}
               template={tool === 'template' ? template : null}
               cursorPosRef={cursorPosRef}
