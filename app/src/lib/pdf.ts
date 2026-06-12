@@ -3,15 +3,17 @@
 // 返した Blob はそのまま compressFloorImage に渡せる。
 // pdfjs 本体はサイズが大きいので動的 import で遅延読み込みする。
 
-export function isPdfFile(file) {
+export function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name ?? '');
 }
 
 /**
  * PDF の 1 ページ目を画像化する。
- * @returns {Promise<{blob: Blob, numPages: number}>}
  */
-export async function renderPdfFirstPage(file, maxSize = 2000) {
+export async function renderPdfFirstPage(
+  file: File,
+  maxSize = 2000
+): Promise<{ blob: Blob; numPages: number }> {
   const [pdfjs, workerMod] = await Promise.all([
     import('pdfjs-dist'),
     import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
@@ -29,13 +31,13 @@ export async function renderPdfFirstPage(file, maxSize = 2000) {
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(viewport.width);
     canvas.height = Math.round(viewport.height);
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d')!;
     // 図面は白背景前提 (透過対策)
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvasContext: ctx, canvas, viewport }).promise;
 
-    const blob = await new Promise((resolve, reject) =>
+    const blob = await new Promise<Blob>((resolve, reject) =>
       canvas.toBlob(
         (b) => (b ? resolve(b) : reject(new Error('PDF の画像化に失敗しました'))),
         'image/png'
@@ -43,6 +45,7 @@ export async function renderPdfFirstPage(file, maxSize = 2000) {
     );
     return { blob, numPages: doc.numPages };
   } finally {
-    doc.destroy?.();
+    // pdfjs-dist v6 の型定義に destroy が無いが、実体には存在しうるため optional call で呼ぶ
+    (doc as unknown as { destroy?: () => void }).destroy?.();
   }
 }

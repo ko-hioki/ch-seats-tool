@@ -49,6 +49,7 @@
 ## 技術構成
 
 - ビルドあり構成: React + Tailwind CSS + shadcn/ui + Vite 8（node v22 利用可能）
+- TypeScript 化済み（src/ は .ts/.tsx、strict モード。`npm run typecheck` で検証。ドメイン型は lib/model.ts に定義）
 - `base: './'` を vite.config.js に指定（zaproom 配信要件）
 - ローカル開発: vite-plugin-session-datastore.mjs（Session Datastore エミュレータ）を使用
 - zip: dist/ の中身をトップレベルに（index.html, manifest.json, spec.md, favicon 等）

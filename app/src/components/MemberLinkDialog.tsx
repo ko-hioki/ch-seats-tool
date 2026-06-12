@@ -9,14 +9,33 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { departmentColor } from '@/lib/colors';
+import { departmentColor, type DepartmentColor } from '@/lib/colors';
+import type { Member, Seat } from '@/lib/model';
+
+interface MemberLinkDialogProps {
+  open: boolean;
+  seat: Seat | null;
+  members: Member[];
+  colorMap: Map<string, DepartmentColor>;
+  onClose: () => void;
+  onLink: (memberId: string) => void;
+  onRegisterAndLink: (name: string) => void;
+}
 
 /**
  * 席の直接入力名と台帳メンバーを紐付けるダイアログ。
  * - 一覧からメンバーを選んで紐付け
  * - 席の名前で台帳に新規登録して紐付け
  */
-export default function MemberLinkDialog({ open, seat, members, colorMap, onClose, onLink, onRegisterAndLink }) {
+export default function MemberLinkDialog({
+  open,
+  seat,
+  members,
+  colorMap,
+  onClose,
+  onLink,
+  onRegisterAndLink,
+}: MemberLinkDialogProps) {
   const [filter, setFilter] = useState('');
 
   const list = useMemo(() => {

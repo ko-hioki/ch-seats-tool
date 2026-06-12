@@ -1,9 +1,12 @@
 // CSV / TSV パーサ (スプレッドシートからの貼り付けに対応)
 // タブが含まれていれば TSV、それ以外は CSV として解釈する。
 
-function parseDelimited(text, delimiter) {
-  const rows = [];
-  let row = [];
+/** 列のマッピング先となる Member のフィールド ('' は不明/取り込まない) */
+export type MemberCsvField = 'name' | 'nickname' | 'department' | 'slackUserId' | 'note';
+
+function parseDelimited(text: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
   let field = '';
   let inQuotes = false;
   for (let i = 0; i < text.length; i++) {
@@ -42,21 +45,16 @@ function parseDelimited(text, delimiter) {
   return rows.filter((r) => r.some((cell) => cell.trim() !== ''));
 }
 
-/**
- * @param {string} text
- * @returns {string[][]}
- */
-export function parseTable(text) {
+export function parseTable(text: string): string[][] {
   const delimiter = text.includes('\t') ? '\t' : ',';
   return parseDelimited(text, delimiter);
 }
 
 /**
  * ヘッダー行から各列のマッピング先フィールドを推定する。
- * @param {string[]} header
- * @returns {string[]} 各列の推定フィールド ('' は不明)
+ * @returns 各列の推定フィールド ('' は不明)
  */
-export function guessMapping(header) {
+export function guessMapping(header: string[]): (MemberCsvField | '')[] {
   return header.map((h) => {
     const t = (h || '').toLowerCase();
     if (/本名|氏名|名前|name/.test(t)) return 'name';

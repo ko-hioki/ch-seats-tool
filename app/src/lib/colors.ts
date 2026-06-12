@@ -1,7 +1,13 @@
 // 部署/チームごとの色分け
 // 部署名から決定的に色を割り当てる (パレットから順に、足りなければハッシュ)
 
-const PALETTE = [
+export interface DepartmentColor {
+  bg: string;
+  border: string;
+  text: string;
+}
+
+const PALETTE: DepartmentColor[] = [
   { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' }, // blue
   { bg: '#dcfce7', border: '#22c55e', text: '#166534' }, // green
   { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' }, // amber
@@ -16,9 +22,9 @@ const PALETTE = [
   { bg: '#ccfbf1', border: '#14b8a6', text: '#115e59' }, // teal
 ];
 
-const NO_DEPT = { bg: '#f1f5f9', border: '#94a3b8', text: '#334155' };
+const NO_DEPT: DepartmentColor = { bg: '#f1f5f9', border: '#94a3b8', text: '#334155' };
 
-function hashString(str) {
+function hashString(str: string): number {
   let h = 0;
   for (let i = 0; i < str.length; i++) {
     h = (h * 31 + str.charCodeAt(i)) | 0;
@@ -28,25 +34,34 @@ function hashString(str) {
 
 /**
  * 全部署一覧から色マップを作る (一覧順で安定割り当て)
- * @param {string[]} departments
- * @returns {Map<string, {bg: string, border: string, text: string}>}
  */
-export function buildDepartmentColorMap(departments) {
+export function buildDepartmentColorMap(departments: string[]): Map<string, DepartmentColor> {
   const uniq = [...new Set(departments.filter(Boolean))].sort();
-  const map = new Map();
+  const map = new Map<string, DepartmentColor>();
   uniq.forEach((dept, i) => {
     map.set(dept, i < PALETTE.length ? PALETTE[i] : PALETTE[hashString(dept) % PALETTE.length]);
   });
   return map;
 }
 
-export function departmentColor(colorMap, department) {
+export function departmentColor(
+  colorMap: Map<string, DepartmentColor>,
+  department: string | null | undefined
+): DepartmentColor {
   if (!department) return NO_DEPT;
   return colorMap.get(department) ?? NO_DEPT;
 }
 
+export interface ZoneColor {
+  key: string;
+  label: string;
+  fill: string;
+  border: string;
+  text: string;
+}
+
 // エリア (ゾーン) のプリセットカラー (半透明塗り + 枠 + ラベル文字色)
-export const ZONE_COLORS = [
+export const ZONE_COLORS: ZoneColor[] = [
   { key: 'blue', label: 'ブルー', fill: 'rgba(59, 130, 246, 0.16)', border: 'rgba(37, 99, 235, 0.55)', text: '#1d4ed8' },
   { key: 'green', label: 'グリーン', fill: 'rgba(34, 197, 94, 0.16)', border: 'rgba(22, 163, 74, 0.55)', text: '#15803d' },
   { key: 'amber', label: 'アンバー', fill: 'rgba(245, 158, 11, 0.18)', border: 'rgba(217, 119, 6, 0.55)', text: '#b45309' },
@@ -61,6 +76,6 @@ export const ZONE_COLORS = [
   { key: 'slate', label: 'グレー', fill: 'rgba(100, 116, 139, 0.15)', border: 'rgba(71, 85, 105, 0.55)', text: '#334155' },
 ];
 
-export function zoneColor(key) {
+export function zoneColor(key: string): ZoneColor {
   return ZONE_COLORS.find((c) => c.key === key) ?? ZONE_COLORS[0];
 }

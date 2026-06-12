@@ -1,12 +1,29 @@
 import { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Minus, Maximize } from 'lucide-react';
-import { BLANK_CANVAS, seatDisplayName } from '@/lib/model';
-import { departmentColor, zoneColor } from '@/lib/colors';
+import {
+  BLANK_CANVAS,
+  seatDisplayName,
+  type Location,
+  type Member,
+  type NameMode,
+  type Seat,
+  type SeatTemplate,
+  type SeatType,
+  type Zone,
+} from '@/lib/model';
+import { departmentColor, zoneColor, type DepartmentColor } from '@/lib/colors';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
+interface SeatStyle {
+  background: string;
+  borderColor: string;
+  borderStyle: string;
+  color: string;
+}
+
 // 座席種別ごとの空席時スタイル
-const VACANT_STYLES = {
+const VACANT_STYLES: Record<SeatType, SeatStyle> = {
   fixed: { background: '#ffffff', borderColor: '#94a3b8', borderStyle: 'solid', color: '#94a3b8' },
   free: { background: '#f0f9ff', borderColor: '#38bdf8', borderStyle: 'dashed', color: '#0369a1' },
   meeting: { background: '#faf5ff', borderColor: '#a855f7', borderStyle: 'solid', color: '#7e22ce' },
@@ -14,12 +31,26 @@ const VACANT_STYLES = {
 };
 
 // 直接入力の名前のみ (台帳未紐付け) の座席スタイル
-const NAMED_STYLES = {
+const NAMED_STYLES: Record<SeatType, SeatStyle> = {
   fixed: { background: '#ffffff', borderColor: '#64748b', borderStyle: 'solid', color: '#1e293b' },
   free: { background: '#f0f9ff', borderColor: '#0284c7', borderStyle: 'dashed', color: '#0c4a6e' },
   meeting: { background: '#faf5ff', borderColor: '#9333ea', borderStyle: 'solid', color: '#581c87' },
   other: { background: '#f8fafc', borderColor: '#64748b', borderStyle: 'dotted', color: '#334155' },
 };
+
+interface SeatNodeProps {
+  seat: Seat;
+  member: Member | null | undefined;
+  colorMap: Map<string, DepartmentColor>;
+  seatW: number;
+  seatH: number;
+  W: number;
+  H: number;
+  selected: boolean;
+  highlighted: boolean | undefined;
+  dimmed: boolean;
+  nameMode: NameMode;
+}
 
 function SeatNode({
   seat,
@@ -33,9 +64,9 @@ function SeatNode({
   highlighted,
   dimmed,
   nameMode,
-}) {
+}: SeatNodeProps) {
   const displayName = seatDisplayName(seat, member, nameMode);
-  let style;
+  let style: SeatStyle;
   if (member) {
     const c = departmentColor(colorMap, member.department);
     style = {
@@ -109,21 +140,39 @@ function SeatNode({
   );
 }
 
+interface InlineNameInputProps {
+  left: number;
+  top: number;
+  width: number;
+  initial: string;
+  placeholder?: string;
+  onCommit: (value: string, opts?: { advance?: number }) => void;
+  onCancel: () => void;
+}
+
 /**
  * 座席の上に重ねて表示するインライン名前入力。
  * Enter で確定 / Tab で確定して隣の席へ (Shift+Tab で逆方向) / Esc でキャンセル / フォーカスを外すと確定。
  */
-function InlineNameInput({ left, top, width, initial, placeholder = '名前を入力', onCommit, onCancel }) {
+function InlineNameInput({
+  left,
+  top,
+  width,
+  initial,
+  placeholder = '名前を入力',
+  onCommit,
+  onCancel,
+}: InlineNameInputProps) {
   const [value, setValue] = useState(initial);
   const doneRef = useRef(false);
-  const inputRef = useRef(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
 
-  const commit = (opts) => {
+  const commit = (opts?: { advance?: number }) => {
     if (doneRef.current) return;
     doneRef.current = true;
     onCommit(value, opts);
@@ -157,6 +206,161 @@ function InlineNameInput({ left, top, width, initial, placeholder = '名前を�
       onBlur={() => commit()}
     />
   );
+}
+
+interface RelPoint {
+  x: number;
+  y: number;
+}
+
+interface RelRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// ポインタジェスチャの状態 (type で判別)
+type Gesture =
+  | {
+      type: 'pinch';
+      startDist: number;
+      startScale: number;
+      startTx: number;
+      startTy: number;
+      startMidX: number;
+      startMidY: number;
+    }
+  | {
+      type: 'pan';
+      seatId: string | null;
+      zoneId: string | null;
+      startX: number;
+      startY: number;
+      origTx: number;
+      origTy: number;
+      moved: boolean;
+    }
+  | { type: 'toggle'; seatId: string }
+  | {
+      type: 'seat';
+      seatId: string;
+      items: { id: string; origX: number; origY: number }[];
+      startX: number;
+      startY: number;
+      origX: number;
+      origY: number;
+      moved: boolean;
+    }
+  | {
+      type: 'seat-resize';
+      seatId: string;
+      edge: string; // 'e' | 's' | 'se'
+      startX: number;
+      startY: number;
+      moved?: boolean;
+      orig: { x: number; y: number; w: number; h: number; rotation: number };
+    }
+  | {
+      type: 'seat-rotate';
+      seatId: string;
+      startX: number;
+      startY: number;
+      moved: boolean;
+      cx: number;
+      cy: number;
+    }
+  | {
+      type: 'zone-resize';
+      zoneId: string;
+      corner: string;
+      startX: number;
+      startY: number;
+      moved?: boolean;
+      orig: { x: number; y: number; w: number; h: number };
+    }
+  | {
+      type: 'zone-draw';
+      startX: number;
+      startY: number;
+      origin: RelPoint;
+      rect: RelRect | null;
+      moved: boolean;
+    }
+  | {
+      type: 'stamp';
+      startX: number;
+      startY: number;
+      origin: RelPoint;
+      points: RelPoint[] | null;
+      moved: boolean;
+    }
+  | { type: 'template'; startX: number; startY: number; moved: boolean }
+  | {
+      type: 'zone-move';
+      zoneId: string;
+      startX: number;
+      startY: number;
+      origX: number;
+      origY: number;
+      w: number;
+      h: number;
+      moved: boolean;
+    }
+  | {
+      type: 'marquee';
+      additive: boolean;
+      zoneId: string | null;
+      startX: number;
+      startY: number;
+      rectLeft: number;
+      rectTop: number;
+      moved: boolean;
+    };
+
+type Tool = 'select' | 'place' | 'zone' | 'template';
+
+interface FloorMapProps {
+  location: Location;
+  seats: Seat[];
+  zones?: Zone[];
+  memberById: Map<string, Member>;
+  colorMap: Map<string, DepartmentColor>;
+  mode: 'view' | 'edit';
+  nameMode?: NameMode;
+  tool?: Tool;
+  template?: SeatTemplate | null;
+  cursorPosRef?: React.MutableRefObject<RelPoint | null> | null;
+  flowName?: string | null;
+  selectedSeatIds?: Set<string>;
+  selectedZoneId?: string | null;
+  editingSeatId?: string | null;
+  editingZoneId?: string | null;
+  highlightIds?: Set<string>;
+  searchActive?: boolean;
+  onSelectSeat?: (id: string | null) => void;
+  onSelectSeats?: (ids: string[]) => void;
+  onToggleSeat?: (id: string) => void;
+  onSeatClick?: (id: string) => void;
+  onMoveSeat?: (id: string, x: number, y: number) => void;
+  onMoveSeats?: (moves: { id: string; x: number; y: number }[]) => void;
+  onResizeSeat?: (id: string, patch: { w: number; h: number; x: number; y: number }) => void;
+  onRotateSeat?: (id: string, rotation: number) => void;
+  onSeatTap?: (seatId: string | null, x?: number, y?: number) => void;
+  onAddSeatAt?: (x: number, y: number) => void;
+  onAddSeatsAt?: (points: RelPoint[]) => void;
+  onPlaceTemplate?: (x: number, y: number) => void;
+  onFlowClickSeat?: (seatId: string) => void;
+  onFlowPlace?: (x: number, y: number) => void;
+  onCommitName?: (seatId: string, value: string, opts?: { advance?: number }) => void;
+  onCancelName?: () => void;
+  onSelectZone?: (id: string | null) => void;
+  onAddZone?: (rect: RelRect) => void;
+  onMoveZone?: (id: string, x: number, y: number) => void;
+  onResizeZone?: (id: string, rect: RelRect) => void;
+  onCommitZoneLabel?: (id: string, value: string) => void;
+  onCancelZoneLabel?: () => void;
+  onDropFile?: (file: File) => void;
 }
 
 /**
@@ -215,34 +419,36 @@ export default function FloorMap({
   onCommitZoneLabel,
   onCancelZoneLabel,
   onDropFile,
-}) {
-  const containerRef = useRef(null);
+}: FloorMapProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ scale: 0.4, tx: 0, ty: 0 });
   const viewRef = useRef(view);
   viewRef.current = view;
-  const gestureRef = useRef(null);
-  const pointersRef = useRef(new Map());
+  const gestureRef = useRef<Gesture | null>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
   // ユーザーが手動でズーム/パンしたか (false の間はリサイズ時に自動フィット)
   const interactedRef = useRef(false);
   // 図面ファイルのドラッグオーバー表示 (dragenter/dragleave はネストで連続発火するためカウンタで管理)
   const [draggingFile, setDraggingFile] = useState(false);
   const dragCountRef = useRef(0);
   // 矩形選択 (コンテナ相対の画面座標)
-  const [marquee, setMarquee] = useState(null); // {x, y, w, h}
+  const [marquee, setMarquee] = useState<RelRect | null>(null); // {x, y, w, h}
   // 一列スタンプ配置のプレビュー (相対座標の配列)
-  const [stamp, setStamp] = useState(null); // {points: [{x, y}]}
+  const [stamp, setStamp] = useState<{ points: RelPoint[] } | null>(null);
   // エリア (ゾーン) 描画中のプレビュー矩形 (相対座標)
-  const [zoneDraft, setZoneDraft] = useState(null); // {x, y, w, h}
+  const [zoneDraft, setZoneDraft] = useState<RelRect | null>(null);
   // スナップ吸着ガイド線 (相対座標)
-  const [guides, setGuides] = useState(null); // {x: relX|null, y: relY|null}
+  const [guides, setGuides] = useState<{ x: number | null; y: number | null } | null>(null);
   // テンプレート配置プレビューのカーソル位置 (相対座標)
-  const [tplCursor, setTplCursor] = useState(null);
+  const [tplCursor, setTplCursor] = useState<RelPoint | null>(null);
   // Space 押下中フラグ (編集モードでは背景ドラッグが矩形選択になるため、Space+ドラッグでパン)
   const [spaceHeld, setSpaceHeld] = useState(false);
   const spaceRef = useRef(false);
   // 直前の席クリック (画面座標 + 時刻)。席を選択するとツールバー出現でレイアウトがずれ、
   // ダブルクリックの 2 回目が背景に落ちることがあるため、その救済判定に使う
-  const lastSeatClickRef = useRef(null); // {seatId, x, y, time}
+  const lastSeatClickRef = useRef<{ seatId: string; x: number; y: number; time: number } | null>(
+    null
+  );
 
   useEffect(() => {
     if (tool !== 'template') setTplCursor(null);
@@ -251,9 +457,9 @@ export default function FloorMap({
   // Space キーの押下状態を監視 (編集モードのみ。入力欄/ボタンへの Space は除外)
   useEffect(() => {
     if (mode !== 'edit') return;
-    const down = (e) => {
+    const down = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
-      const tag = e.target?.tagName;
+      const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return;
       e.preventDefault(); // ページスクロール等の既定動作を抑止
       if (!e.repeat) {
@@ -261,7 +467,7 @@ export default function FloorMap({
         setSpaceHeld(true);
       }
     };
-    const up = (e) => {
+    const up = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
       spaceRef.current = false;
       setSpaceHeld(false);
@@ -316,7 +522,7 @@ export default function FloorMap({
     return () => ro.disconnect();
   }, [fit]);
 
-  const zoomAt = useCallback((clientX, clientY, factor) => {
+  const zoomAt = useCallback((clientX: number, clientY: number, factor: number) => {
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -339,7 +545,7 @@ export default function FloorMap({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const onWheel = (e) => {
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       interactedRef.current = true;
       if (e.ctrlKey || e.metaKey) {
@@ -353,9 +559,9 @@ export default function FloorMap({
   }, [zoomAt]);
 
   const clientToRel = useCallback(
-    (clientX, clientY) => {
+    (clientX: number, clientY: number): RelPoint => {
       const el = containerRef.current;
-      const rect = el.getBoundingClientRect();
+      const rect = el!.getBoundingClientRect();
       const v = viewRef.current;
       return {
         x: (clientX - rect.left - v.tx) / v.scale / W,
@@ -371,12 +577,12 @@ export default function FloorMap({
    * 戻り値の guideX/guideY は吸着が発生した相対座標 (ガイド線描画用)。
    */
   const snapPosition = useCallback(
-    (nx, ny, excludeIds) => {
+    (nx: number, ny: number, excludeIds: Set<string> | null) => {
       const v = viewRef.current;
       const thX = 8 / (v.scale * W);
       const thY = 8 / (v.scale * H);
-      let bestX = null;
-      let bestY = null;
+      let bestX: number | null = null;
+      let bestY: number | null = null;
       let dX = Infinity;
       let dY = Infinity;
       for (const s of seats) {
@@ -421,10 +627,10 @@ export default function FloorMap({
     };
   }
 
-  function onPointerDown(e) {
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     const el = containerRef.current;
     try {
-      el.setPointerCapture?.(e.pointerId);
+      el?.setPointerCapture?.(e.pointerId);
     } catch {
       // 一部環境で pointerId が無効な場合があるが、キャプチャ無しでも動作する
     }
@@ -466,16 +672,18 @@ export default function FloorMap({
       return;
     }
 
+    const target = e.target as HTMLElement;
+
     // 座席のリサイズ/回転ハンドル (単一選択時のみ描画される) を最優先で判定
     if (mode === 'edit' && flowName == null) {
-      const seatHandleEl = e.target.closest?.('[data-seat-handle]');
+      const seatHandleEl = target.closest?.('[data-seat-handle]') as HTMLElement | null;
       if (seatHandleEl) {
-        const s = seatById.get(seatHandleEl.dataset.seatHandleId);
+        const s = seatById.get(seatHandleEl.dataset.seatHandleId!);
         if (s) {
           gestureRef.current = {
             type: 'seat-resize',
             seatId: s.id,
-            edge: seatHandleEl.dataset.seatHandle, // 'e' | 's' | 'se'
+            edge: seatHandleEl.dataset.seatHandle!, // 'e' | 's' | 'se'
             startX: e.clientX,
             startY: e.clientY,
             orig: { x: s.x, y: s.y, w: s.w ?? 1, h: s.h ?? 1, rotation: s.rotation ?? 0 },
@@ -483,12 +691,12 @@ export default function FloorMap({
           return;
         }
       }
-      const rotateEl = e.target.closest?.('[data-seat-rotate]');
+      const rotateEl = target.closest?.('[data-seat-rotate]') as HTMLElement | null;
       if (rotateEl) {
-        const s = seatById.get(rotateEl.dataset.seatRotate);
+        const s = seatById.get(rotateEl.dataset.seatRotate!);
         if (s) {
           // 回転中も席の中心は動かないので、開始時点の中心 (画面座標) を保持
-          const rect = el.getBoundingClientRect();
+          const rect = el!.getBoundingClientRect();
           const v = viewRef.current;
           gestureRef.current = {
             type: 'seat-rotate',
@@ -505,14 +713,14 @@ export default function FloorMap({
     }
 
     // エリアのリサイズハンドル (選択中エリアのみ描画される) を最優先で判定
-    const handleEl = e.target.closest?.('[data-zone-handle]');
+    const handleEl = target.closest?.('[data-zone-handle]') as HTMLElement | null;
     if (handleEl && mode === 'edit' && flowName == null) {
-      const z = zoneById.get(handleEl.dataset.zoneId);
+      const z = zoneById.get(handleEl.dataset.zoneId!);
       if (z) {
         gestureRef.current = {
           type: 'zone-resize',
           zoneId: z.id,
-          corner: handleEl.dataset.zoneHandle,
+          corner: handleEl.dataset.zoneHandle!,
           startX: e.clientX,
           startY: e.clientY,
           orig: { x: z.x, y: z.y, w: z.w, h: z.h },
@@ -521,10 +729,10 @@ export default function FloorMap({
       }
     }
 
-    const seatEl = e.target.closest?.('[data-seat-id]');
+    const seatEl = target.closest?.('[data-seat-id]') as HTMLElement | null;
     const seatId = seatEl?.dataset.seatId ?? null;
     // エリアは座席より背面なので、座席が乗っていない部分のクリックでのみヒットする
-    const zoneEl = e.target.closest?.('[data-zone-id]');
+    const zoneEl = target.closest?.('[data-zone-id]') as HTMLElement | null;
     const zoneId = zoneEl?.dataset.zoneId ?? null;
 
     if (seatId && mode === 'edit') {
@@ -533,12 +741,12 @@ export default function FloorMap({
         gestureRef.current = { type: 'toggle', seatId };
         return;
       }
-      const seat = seatById.get(seatId);
+      const seat = seatById.get(seatId)!;
       // 選択中の席を掴んだ場合は選択席全体を一括移動の対象にする
       const inSelection = selectedSeatIds?.has(seatId) && selectedSeatIds.size > 1;
       const items = inSelection
         ? seats
-            .filter((s) => selectedSeatIds.has(s.id))
+            .filter((s) => selectedSeatIds!.has(s.id))
             .map((s) => ({ id: s.id, origX: s.x, origY: s.y }))
         : [{ id: seatId, origX: seat.x, origY: seat.y }];
       gestureRef.current = {
@@ -593,7 +801,7 @@ export default function FloorMap({
       zoneId === selectedZoneId
     ) {
       // 選択中のエリアを掴んだ場合のみドラッグ移動 (未選択エリア上はパン + クリックで選択)
-      const z = zoneById.get(zoneId);
+      const z = zoneById.get(zoneId)!;
       gestureRef.current = {
         type: 'zone-move',
         zoneId,
@@ -608,7 +816,7 @@ export default function FloorMap({
     } else if (mode === 'edit' && flowName == null && tool === 'select') {
       // 背景の左ドラッグ = 矩形選択 (Shift 押下中は既存選択への追加)。クリック (移動なし) は
       // エリア選択 / 選択解除として扱う。パンは Space+ドラッグ / 中ボタン / 2本指 / ピンチ
-      const rect = el.getBoundingClientRect();
+      const rect = el!.getBoundingClientRect();
       gestureRef.current = {
         type: 'marquee',
         additive: e.shiftKey,
@@ -634,7 +842,7 @@ export default function FloorMap({
     }
   }
 
-  function onPointerMove(e) {
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
     // ホバー中のカーソル位置 (相対座標) を記録 (コピペの貼り付け基準・テンプレートプレビュー用)
     if (cursorPosRef || (mode === 'edit' && tool === 'template')) {
       const rel = clientToRel(e.clientX, e.clientY);
@@ -648,7 +856,7 @@ export default function FloorMap({
 
     if (g.type === 'pinch' && pointersRef.current.size >= 2) {
       const el = containerRef.current;
-      const rect = el.getBoundingClientRect();
+      const rect = el!.getBoundingClientRect();
       const { dist, midX, midY } = pinchInfo();
       const scale = Math.min(4, Math.max(0.05, g.startScale * (dist / g.startDist)));
       const ratio = scale / g.startScale;
@@ -661,6 +869,8 @@ export default function FloorMap({
       });
       return;
     }
+    // pinch でポインタが 2 本未満の場合、以降の分岐はどれにも該当せず no-op (元実装と同じ)
+    if (g.type === 'pinch') return;
 
     if (g.type === 'toggle') return;
 
@@ -688,7 +898,7 @@ export default function FloorMap({
       const lx = dxc * Math.cos(th) + dyc * Math.sin(th);
       const ly = -dxc * Math.sin(th) + dyc * Math.cos(th);
       // 0.25 刻みスナップ + 0.5〜6.0 クランプ
-      const snapSize = (val) => Math.min(6, Math.max(0.5, Math.round(val * 4) / 4));
+      const snapSize = (val: number) => Math.min(6, Math.max(0.5, Math.round(val * 4) / 4));
       let w = g.orig.w;
       let h = g.orig.h;
       if (g.edge.includes('e')) w = snapSize(g.orig.w + lx / seatW);
@@ -765,7 +975,7 @@ export default function FloorMap({
       const count = Math.max(1, Math.floor(len / spacing) + 1);
       const ux = len ? ddx / len : 0;
       const uy = len ? ddy / len : 0;
-      const points = [];
+      const points: RelPoint[] = [];
       for (let i = 0; i < count; i++) {
         const px = (sx + ux * spacing * i) / W;
         const py = (sy + uy * spacing * i) / H;
@@ -797,7 +1007,8 @@ export default function FloorMap({
       const rdy = dy / v.scale / H;
       const minW = 24 / W;
       const minH = 24 / H;
-      let { x, y, w, h } = g.orig;
+      let { x, y } = g.orig;
+      const { w, h } = g.orig;
       let x2 = x + w;
       let y2 = y + h;
       if (g.corner.includes('e')) x2 = Math.min(1, Math.max(x + minW, x2 + rdx));
@@ -810,7 +1021,7 @@ export default function FloorMap({
     }
   }
 
-  function onPointerUp(e) {
+  function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
     pointersRef.current.delete(e.pointerId);
     const g = gestureRef.current;
     if (!g) return;
@@ -938,10 +1149,11 @@ export default function FloorMap({
     }
   }
 
-  function onDoubleClick(e) {
+  function onDoubleClick(e: React.MouseEvent<HTMLDivElement>) {
     // place/template モードはクリックごとに配置済みなので、ダブルクリックで余計な単席を追加しない
     if (mode !== 'edit' || flowName != null || tool === 'place' || tool === 'template') return;
-    let seatId = e.target.closest?.('[data-seat-id]')?.dataset.seatId ?? null;
+    const target = e.target as HTMLElement;
+    let seatId = (target.closest?.('[data-seat-id]') as HTMLElement | null)?.dataset.seatId ?? null;
     if (!seatId) {
       // 1 回目の席クリックで選択ツールバーが出現してレイアウトがずれ、2 回目のクリックが
       // 背景に落ちた場合の救済: 直前の席クリックとほぼ同位置・短時間ならその席への
@@ -986,7 +1198,10 @@ export default function FloorMap({
   // 編集モード時のみ図面ファイル (PDF/画像) のドロップを受け付ける。
   // pointer イベントとは独立した DOM イベントなのでジェスチャ処理への影響はない。
   const fileDropEnabled = mode === 'edit' && !!onDropFile;
-  const dndHandlers = fileDropEnabled
+  const dndHandlers: Pick<
+    React.HTMLAttributes<HTMLDivElement>,
+    'onDragEnter' | 'onDragOver' | 'onDragLeave' | 'onDrop'
+  > = fileDropEnabled
     ? {
         onDragEnter: (e) => {
           if (!e.dataTransfer?.types?.includes('Files')) return;
@@ -1060,7 +1275,7 @@ export default function FloorMap({
       >
         {hasImage ? (
           <img
-            src={location.floorImage}
+            src={location.floorImage!}
             alt={location.name}
             width={W}
             height={H}
@@ -1164,7 +1379,7 @@ export default function FloorMap({
               H={H}
               selected={mode === 'edit' && !!selectedSeatIds?.has(seat.id)}
               highlighted={highlighted}
-              dimmed={searchActive && !highlighted}
+              dimmed={!!searchActive && !highlighted}
               nameMode={nameMode}
             />
           );
@@ -1334,7 +1549,7 @@ export default function FloorMap({
             top: view.ty + lastStampPoint.y * H * view.scale - 30,
           }}
         >
-          {stamp.points.length}席
+          {stamp!.points.length}席
         </div>
       ) : null}
 
@@ -1378,7 +1593,7 @@ export default function FloorMap({
         <Button variant="outline" size="icon" onClick={() => {
           interactedRef.current = true;
           const el = containerRef.current;
-          const r = el.getBoundingClientRect();
+          const r = el!.getBoundingClientRect();
           zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1.25);
         }} title="拡大">
           <Plus />
@@ -1386,7 +1601,7 @@ export default function FloorMap({
         <Button variant="outline" size="icon" onClick={() => {
           interactedRef.current = true;
           const el = containerRef.current;
-          const r = el.getBoundingClientRect();
+          const r = el!.getBoundingClientRect();
           zoomAt(r.left + r.width / 2, r.top + r.height / 2, 0.8);
         }} title="縮小">
           <Minus />

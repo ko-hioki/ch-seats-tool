@@ -11,10 +11,11 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { parseTable, guessMapping } from '@/lib/csv';
+import { parseTable, guessMapping, type MemberCsvField } from '@/lib/csv';
+import type { Member } from '@/lib/model';
 
 // 列のマッピング先
-const FIELDS = [
+const FIELDS: { value: MemberCsvField | ''; label: string }[] = [
   { value: '', label: '(取り込まない)' },
   { value: 'name', label: '本名' },
   { value: 'nickname', label: 'あだ名' },
@@ -25,16 +26,27 @@ const FIELDS = [
 
 const FIELD_LABELS = Object.fromEntries(FIELDS.map((f) => [f.value, f.label]));
 
+const PREVIEW_FIELDS: MemberCsvField[] = ['name', 'nickname', 'department', 'slackUserId', 'note'];
+
+type MemberAttrs = Partial<Record<MemberCsvField, string>>;
+
+interface CsvImportDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onImport: (list: Partial<Member>[]) => void;
+  existingNames: string[];
+}
+
 /**
  * 社員名簿 (スプレッドシート貼り付け / CSV) の一括取り込みダイアログ。
  * 貼り付け → 列マッピング指定 → プレビュー → 取り込み の汎用フロー。
  */
-export default function CsvImportDialog({ open, onClose, onImport, existingNames }) {
-  const [step, setStep] = useState('paste'); // 'paste' | 'map'
+export default function CsvImportDialog({ open, onClose, onImport, existingNames }: CsvImportDialogProps) {
+  const [step, setStep] = useState<'paste' | 'map'>('paste');
   const [text, setText] = useState('');
-  const [rows, setRows] = useState([]);
+  const [rows, setRows] = useState<string[][]>([]);
   const [hasHeader, setHasHeader] = useState(true);
-  const [mapping, setMapping] = useState([]);
+  const [mapping, setMapping] = useState<(MemberCsvField | '')[]>([]);
   const [skipDup, setSkipDup] = useState(true);
 
   function reset() {
@@ -64,7 +76,7 @@ export default function CsvImportDialog({ open, onClose, onImport, existingNames
     setStep('map');
   }
 
-  async function onFile(e) {
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
@@ -75,13 +87,13 @@ export default function CsvImportDialog({ open, onClose, onImport, existingNames
   const colCount = rows[0]?.length ?? 0;
 
   const { candidates, skipped } = useMemo(() => {
-    if (step !== 'map') return { candidates: [], skipped: 0 };
+    if (step !== 'map') return { candidates: [] as MemberAttrs[], skipped: 0 };
     const nameIdx = mapping.indexOf('name');
     const existing = new Set((existingNames ?? []).map((n) => n.trim()));
-    const list = [];
+    const list: MemberAttrs[] = [];
     let skippedCount = 0;
     for (const row of dataRows) {
-      const attrs = {};
+      const attrs: MemberAttrs = {};
       mapping.forEach((field, i) => {
         if (field) attrs[field] = (row[i] ?? '').trim();
       });
@@ -163,7 +175,9 @@ export default function CsvImportDialog({ open, onClose, onImport, existingNames
                       className="h-8"
                       value={mapping[i] ?? ''}
                       onChange={(e) =>
-                        setMapping((m) => m.map((v, j) => (j === i ? e.target.value : v)))
+                        setMapping((m) =>
+                          m.map((v, j) => (j === i ? (e.target.value as MemberCsvField | '') : v))
+                        )
                       }
                     >
                       {FIELDS.map((f) => (
@@ -190,25 +204,21 @@ export default function CsvImportDialog({ open, onClose, onImport, existingNames
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-muted">
                     <tr>
-                      {['name', 'nickname', 'department', 'slackUserId', 'note']
-                        .filter((f) => mapping.includes(f))
-                        .map((f) => (
-                          <th key={f} className="px-2 py-1.5 text-left font-medium">
-                            {FIELD_LABELS[f]}
-                          </th>
-                        ))}
+                      {PREVIEW_FIELDS.filter((f) => mapping.includes(f)).map((f) => (
+                        <th key={f} className="px-2 py-1.5 text-left font-medium">
+                          {FIELD_LABELS[f]}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
                     {candidates.slice(0, 10).map((c, i) => (
                       <tr key={i} className="border-t">
-                        {['name', 'nickname', 'department', 'slackUserId', 'note']
-                          .filter((f) => mapping.includes(f))
-                          .map((f) => (
-                            <td key={f} className="px-2 py-1">
-                              {c[f] ?? ''}
-                            </td>
-                          ))}
+                        {PREVIEW_FIELDS.filter((f) => mapping.includes(f)).map((f) => (
+                          <td key={f} className="px-2 py-1">
+                            {c[f] ?? ''}
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>

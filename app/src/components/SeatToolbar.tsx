@@ -13,19 +13,35 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { SEAT_TYPES } from '@/lib/model';
+import { SEAT_TYPES, type Member, type Seat, type SeatType } from '@/lib/model';
 
-const normRotation = (r) => ((r % 360) + 360) % 360;
+const normRotation = (r: number) => ((r % 360) + 360) % 360;
 
 // 席サイズのプリセット (席ユニット単位の倍率)。ハンドルのドラッグで自由値にもできる
-const SIZE_PRESETS = [
+const SIZE_PRESETS: { w: number; h: number }[] = [
   { w: 1, h: 1 },
   { w: 2, h: 1 },
   { w: 3, h: 1 },
 ];
 
 // 1 → '1'、1.5 → '1.5' (余計な末尾ゼロを出さない)
-const fmtSize = (v) => String(Math.round(v * 100) / 100);
+const fmtSize = (v: number) => String(Math.round(v * 100) / 100);
+
+interface SeatToolbarProps {
+  seats: Seat[];
+  member: Member | null | undefined;
+  onUpdateSeat: (id: string, patch: Partial<Seat>, opts?: { coalesceKey?: string }) => void;
+  onDuplicate: (id: string) => void;
+  onDelete: (id: string) => void;
+  onUnassign: (id: string) => void;
+  onOpenLink: (id: string) => void;
+  onAlign: (type: 'left' | 'top') => void;
+  onDistribute: (axis: 'x' | 'y') => void;
+  onGapAdjust: (factor: number) => void;
+  onRotateAll: (deg: number) => void;
+  onDuplicateGroup: () => void;
+  onDeleteAll: () => void;
+}
 
 /**
  * 編集モードで座席選択時に表示するツールバー。
@@ -46,7 +62,7 @@ export default function SeatToolbar({
   onRotateAll,
   onDuplicateGroup,
   onDeleteAll,
-}) {
+}: SeatToolbarProps) {
   if (!seats?.length) return null;
 
   // 複数選択時: 一括操作ツールバー
@@ -183,7 +199,7 @@ export default function SeatToolbar({
       <Select
         className="h-8 w-36"
         value={seat.type}
-        onChange={(e) => onUpdateSeat(seat.id, { type: e.target.value })}
+        onChange={(e) => onUpdateSeat(seat.id, { type: e.target.value as SeatType })}
       >
         {SEAT_TYPES.map((t) => (
           <option key={t.value} value={t.value}>

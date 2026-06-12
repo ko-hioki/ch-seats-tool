@@ -9,6 +9,18 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import type { Location, Seat } from '@/lib/model';
+
+interface LocationManagerDialogProps {
+  open: boolean;
+  onClose: () => void;
+  locations: Location[];
+  seats: Seat[];
+  onAdd: (name: string) => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
+  onMove: (id: string, dir: number) => void;
+}
 
 /**
  * 拠点 (フロア) の追加・名称変更・削除・並べ替えダイアログ。
@@ -22,7 +34,7 @@ export default function LocationManagerDialog({
   onRename,
   onDelete,
   onMove,
-}) {
+}: LocationManagerDialogProps) {
   const [newName, setNewName] = useState('');
 
   function handleAdd() {

@@ -13,16 +13,31 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { compressIconImage } from '@/lib/image';
+import type { Member } from '@/lib/model';
+
+interface ProfileForm {
+  nickname: string;
+  icon: string | null;
+  slackUserId: string;
+  note: string;
+}
+
+interface ProfileEditDialogProps {
+  open: boolean;
+  member: Member | null | undefined;
+  onClose: () => void;
+  onSave: (memberId: string, fields: Partial<Member>) => Promise<void>;
+}
 
 /**
  * 閲覧モードからの「プロフィールを編集」ダイアログ。
  * 本人があだ名・アイコン・Slack 情報・メモをその場で更新して即保存する
  * (saveWithRetry によりサーバーの最新データへマージ保存)。
  */
-export default function ProfileEditDialog({ open, member, onClose, onSave }) {
-  const [form, setForm] = useState(null);
+export default function ProfileEditDialog({ open, member, onClose, onSave }: ProfileEditDialogProps) {
+  const [form, setForm] = useState<ProfileForm | null>(null);
   const [saving, setSaving] = useState(false);
-  const fileRef = useRef(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open && member) {
@@ -38,30 +53,30 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }) {
 
   if (!form || !member) return null;
 
-  async function onIconFile(e) {
+  async function onIconFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
     try {
       const dataUrl = await compressIconImage(file);
-      setForm((f) => ({ ...f, icon: dataUrl }));
+      setForm((f) => ({ ...f!, icon: dataUrl }));
     } catch (err) {
-      alert(err.message);
+      alert((err as Error).message);
     }
   }
 
   async function handleSave() {
     setSaving(true);
     try {
-      await onSave(member.id, {
-        nickname: form.nickname.trim(),
-        icon: form.icon,
-        slackUserId: form.slackUserId.trim() || null,
-        note: form.note,
+      await onSave(member!.id, {
+        nickname: form!.nickname.trim(),
+        icon: form!.icon,
+        slackUserId: form!.slackUserId.trim() || null,
+        note: form!.note,
       });
       onClose();
     } catch (err) {
-      alert(err.message);
+      alert((err as Error).message);
     } finally {
       setSaving(false);
     }
@@ -81,7 +96,7 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }) {
             <Label>あだ名 (座席表に表示される名前)</Label>
             <Input
               value={form.nickname}
-              onChange={(e) => setForm((f) => ({ ...f, nickname: e.target.value }))}
+              onChange={(e) => setForm((f) => ({ ...f!, nickname: e.target.value }))}
               placeholder={member.name}
             />
           </div>
@@ -99,7 +114,7 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }) {
                 <Upload /> 画像を選択
               </Button>
               {form.icon ? (
-                <Button variant="ghost" size="sm" onClick={() => setForm((f) => ({ ...f, icon: null }))}>
+                <Button variant="ghost" size="sm" onClick={() => setForm((f) => ({ ...f!, icon: null }))}>
                   <X /> 削除
                 </Button>
               ) : null}
@@ -110,7 +125,7 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }) {
             <Label>Slack ユーザー ID</Label>
             <Input
               value={form.slackUserId}
-              onChange={(e) => setForm((f) => ({ ...f, slackUserId: e.target.value }))}
+              onChange={(e) => setForm((f) => ({ ...f!, slackUserId: e.target.value }))}
               placeholder="U0123ABCDEF"
             />
             <p className="text-xs text-muted-foreground">
@@ -121,7 +136,7 @@ export default function ProfileEditDialog({ open, member, onClose, onSave }) {
             <Label>メモ</Label>
             <Textarea
               value={form.note}
-              onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+              onChange={(e) => setForm((f) => ({ ...f!, note: e.target.value }))}
               rows={2}
             />
           </div>

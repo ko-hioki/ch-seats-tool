@@ -1,17 +1,33 @@
 import { ExternalLink, Pencil, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { departmentColor } from '@/lib/colors';
-import { seatTypeLabel } from '@/lib/model';
+import { departmentColor, type DepartmentColor } from '@/lib/colors';
+import { seatTypeLabel, type Member, type Seat } from '@/lib/model';
 
 const CARD_W = 280;
 const CARD_H = 260;
+
+interface SeatDetailPopoverProps {
+  anchor: { x: number; y: number };
+  seat: Seat | null;
+  member: Member | null | undefined;
+  colorMap: Map<string, DepartmentColor>;
+  onClose: () => void;
+  onEditProfile: (member: Member) => void;
+}
 
 /**
  * 閲覧モードで座席をクリックしたときの詳細ポップオーバー。
  * クリック位置の近くに固定表示する。
  */
-export default function SeatDetailPopover({ anchor, seat, member, colorMap, onClose, onEditProfile }) {
+export default function SeatDetailPopover({
+  anchor,
+  seat,
+  member,
+  colorMap,
+  onClose,
+  onEditProfile,
+}: SeatDetailPopoverProps) {
   if (!seat) return null;
 
   const left = Math.max(8, Math.min(anchor.x + 12, window.innerWidth - CARD_W - 8));
@@ -45,7 +61,7 @@ export default function SeatDetailPopover({ anchor, seat, member, colorMap, onCl
             ) : (
               <span
                 className="flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold"
-                style={{ background: c.bg, color: c.text }}
+                style={{ background: c!.bg, color: c!.text }}
               >
                 {(member.nickname || member.name || '?').slice(0, 1)}
               </span>
@@ -61,7 +77,7 @@ export default function SeatDetailPopover({ anchor, seat, member, colorMap, onCl
             <div>
               <span
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium"
-                style={{ background: c.bg, color: c.text, border: `1px solid ${c.border}` }}
+                style={{ background: c!.bg, color: c!.text, border: `1px solid ${c!.border}` }}
               >
                 {member.department}
               </span>

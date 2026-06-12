@@ -2,19 +2,35 @@ import { useMemo, useState } from 'react';
 import { Pencil, Plus, FileSpreadsheet, GripVertical, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { departmentColor } from '@/lib/colors';
+import { departmentColor, type DepartmentColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
+import type { Location, Member, Seat } from '@/lib/model';
 
-function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMember }) {
+export interface DragGhost {
+  member: Member;
+  x: number;
+  y: number;
+}
+
+interface MemberRowProps {
+  member: Member;
+  seatInfo: string | null | undefined;
+  colorMap: Map<string, DepartmentColor>;
+  onEdit: (member: Member) => void;
+  onDragState: (ghost: DragGhost | null) => void;
+  onDropMember: (memberId: string, seatId: string) => void;
+}
+
+function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMember }: MemberRowProps) {
   const c = departmentColor(colorMap, member.department);
 
-  function onPointerDown(e) {
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    if (e.target.closest('button')) return;
+    if ((e.target as HTMLElement).closest('button')) return;
     const startX = e.clientX;
     const startY = e.clientY;
     let dragging = false;
-    const move = (ev) => {
+    const move = (ev: PointerEvent) => {
       if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 6) {
         dragging = true;
       }
@@ -23,14 +39,14 @@ function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMemb
         onDragState({ member, x: ev.clientX, y: ev.clientY });
       }
     };
-    const up = (ev) => {
+    const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointercancel', cancel);
       if (dragging) {
         onDragState(null);
         const el = document.elementFromPoint(ev.clientX, ev.clientY);
-        const seatEl = el?.closest?.('[data-seat-id]');
-        if (seatEl) onDropMember(member.id, seatEl.dataset.seatId);
+        const seatEl = el?.closest?.('[data-seat-id]') as HTMLElement | null;
+        if (seatEl) onDropMember(member.id, seatEl.dataset.seatId!);
       }
     };
     const cancel = () => {
@@ -90,6 +106,19 @@ function MemberRow({ member, seatInfo, colorMap, onEdit, onDragState, onDropMemb
   );
 }
 
+interface MemberPanelProps {
+  members: Member[];
+  seats: Seat[];
+  locations: Location[];
+  colorMap: Map<string, DepartmentColor>;
+  onDragState: (ghost: DragGhost | null) => void;
+  onDropMember: (memberId: string, seatId: string) => void;
+  onEditMember: (member: Member) => void;
+  onAddMember: () => void;
+  onOpenCsvImport: () => void;
+  onClose: () => void;
+}
+
 /**
  * 編集モードのサイドパネル: メンバー台帳 (任意機能)。
  * 一覧 (割り当て済み/未割り当て)・追加・CSV 取り込み。
@@ -107,17 +136,17 @@ export default function MemberPanel({
   onAddMember,
   onOpenCsvImport,
   onClose,
-}) {
+}: MemberPanelProps) {
   const [filter, setFilter] = useState('');
 
   const { assigned, unassigned, seatInfoByMemberId } = useMemo(() => {
     const locById = new Map(locations.map((l) => [l.id, l]));
-    const seatByMember = new Map();
+    const seatByMember = new Map<string, Seat>();
     for (const s of seats) {
       if (s.memberId) seatByMember.set(s.memberId, s);
     }
     const q = filter.trim().toLowerCase();
-    const match = (m) =>
+    const match = (m: Member) =>
       !q ||
       m.name?.toLowerCase().includes(q) ||
       m.nickname?.toLowerCase().includes(q) ||
@@ -126,9 +155,9 @@ export default function MemberPanel({
       (a.department || '').localeCompare(b.department || '', 'ja') ||
       (a.name || '').localeCompare(b.name || '', 'ja')
     );
-    const assigned = [];
-    const unassigned = [];
-    const seatInfoByMemberId = new Map();
+    const assigned: Member[] = [];
+    const unassigned: Member[] = [];
+    const seatInfoByMemberId = new Map<string, string>();
     for (const m of sorted) {
       if (!match(m)) continue;
       const seat = seatByMember.get(m.id);

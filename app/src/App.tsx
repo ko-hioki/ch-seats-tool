@@ -27,9 +27,16 @@ import {
   uid,
   BLANK_CANVAS,
   SEAT_TEMPLATES,
+  type AppData,
+  type Location,
+  type Member,
+  type NameMode,
+  type Seat,
+  type SeatTemplate,
+  type Zone,
 } from '@/lib/model';
 import { buildDepartmentColorMap } from '@/lib/colors';
-import { compressFloorImage } from '@/lib/image';
+import { compressFloorImage, type CompressedFloorImage } from '@/lib/image';
 import { isPdfFile, renderPdfFirstPage } from '@/lib/pdf';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,7 +53,7 @@ import FloorMap from '@/components/FloorMap';
 import LocationTabs from '@/components/LocationTabs';
 import SeatToolbar from '@/components/SeatToolbar';
 import ZoneToolbar from '@/components/ZoneToolbar';
-import MemberPanel from '@/components/MemberPanel';
+import MemberPanel, { type DragGhost } from '@/components/MemberPanel';
 import MemberEditDialog from '@/components/MemberEditDialog';
 import ProfileEditDialog from '@/components/ProfileEditDialog';
 import SeatDetailPopover from '@/components/SeatDetailPopover';
@@ -54,10 +61,67 @@ import CsvImportDialog from '@/components/CsvImportDialog';
 import DataIODialog from '@/components/DataIODialog';
 import LocationManagerDialog from '@/components/LocationManagerDialog';
 import MemberLinkDialog from '@/components/MemberLinkDialog';
-import NameFlowDialog from '@/components/NameFlowDialog';
+import NameFlowDialog, { type FlowEntry } from '@/components/NameFlowDialog';
 
 const POLL_INTERVAL_MS = 30000;
 const UNDO_LIMIT = 50;
+
+type Mode = 'view' | 'edit';
+type Tool = 'select' | 'place' | 'zone' | 'template';
+
+interface MutateOpts {
+  /** 直前の push と同じキーなら履歴を積まない (ドラッグ移動の集約用) */
+  coalesceKey?: string | null;
+  /** Undo 履歴を積まない (undoFlow などの内部復元用) */
+  skipHistory?: boolean;
+}
+
+interface ConflictState {
+  latestEtag: string;
+  latestData: AppData;
+}
+
+// 流し込みの操作履歴 (「1つ戻す」用)
+type FlowAssignRecord = {
+  type: 'assign';
+  seatId: string;
+  prevName: string;
+  prevMemberId: string | null;
+  entry: FlowEntry;
+  memberId: string | null;
+};
+type FlowRecord =
+  | FlowAssignRecord
+  | { type: 'place'; seatId: string; entry: FlowEntry; memberId: string | null }
+  | { type: 'bulk'; items: FlowAssignRecord[] }
+  | { type: 'skip'; entry: FlowEntry };
+
+interface FlowState {
+  queue: FlowEntry[];
+  total: number;
+  history: FlowRecord[];
+  registerToLedger: boolean;
+}
+
+// コピペ用のアプリ内クリップボードの内容
+interface SeatClipboard {
+  seats: Seat[];
+  cx: number;
+  cy: number;
+  srcW: number;
+  srcH: number;
+}
+
+interface PopoverState {
+  seatId: string;
+  x: number;
+  y: number;
+}
+
+interface ToastState {
+  msg: string;
+  type: 'info' | 'error';
+}
 
 function SessionGuide() {
   return (
@@ -83,19 +147,19 @@ function SessionGuide() {
 export default function App() {
   const sessionId = useMemo(() => getSessionId(), []);
 
-  const [data, setData] = useState(null);
-  const [etag, setEtag] = useState(null);
+  const [data, setData] = useState<AppData | null>(null);
+  const [etag, setEtag] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState('');
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [conflict, setConflict] = useState(null); // {latestEtag, latestData}
+  const [conflict, setConflict] = useState<ConflictState | null>(null); // {latestEtag, latestData}
 
-  const [mode, setMode] = useState('view');
+  const [mode, setMode] = useState<Mode>('view');
   // 表示名モード: あだ名優先 / 本名優先 (閲覧者ごとの好みなのでセッションではなく端末に保存)
-  const [nameMode, setNameMode] = useState(() => {
+  const [nameMode, setNameMode] = useState<NameMode>(() => {
     try {
       return localStorage.getItem('seatNameMode') === 'real' ? 'real' : 'nickname';
     } catch {
@@ -113,38 +177,38 @@ export default function App() {
       return next;
     });
   };
-  const [locationId, setLocationId] = useState(null);
+  const [locationId, setLocationId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [selectedSeatIds, setSelectedSeatIds] = useState(() => new Set());
-  const [tool, setTool] = useState('select'); // 'select' | 'place' (クリック配置) | 'zone' (エリア描画) | 'template' (机テンプレート配置)
-  const [template, setTemplate] = useState(null); // tool='template' 中に配置する机テンプレート (SEAT_TEMPLATES の要素)
+  const [selectedSeatIds, setSelectedSeatIds] = useState<Set<string>>(() => new Set());
+  const [tool, setTool] = useState<Tool>('select'); // 'select' | 'place' (クリック配置) | 'zone' (エリア描画) | 'template' (机テンプレート配置)
+  const [template, setTemplate] = useState<SeatTemplate | null>(null); // tool='template' 中に配置する机テンプレート (SEAT_TEMPLATES の要素)
   const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
-  const [nameEditSeatId, setNameEditSeatId] = useState(null); // インライン名前入力中の座席
-  const [selectedZoneId, setSelectedZoneId] = useState(null); // 選択中のエリア (ゾーン)
-  const [zoneLabelEditId, setZoneLabelEditId] = useState(null); // インラインラベル入力中のエリア
-  const [flow, setFlow] = useState(null); // {queue: [{name, department?}], total, history, registerToLedger} 名前リスト流し込み
+  const [nameEditSeatId, setNameEditSeatId] = useState<string | null>(null); // インライン名前入力中の座席
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null); // 選択中のエリア (ゾーン)
+  const [zoneLabelEditId, setZoneLabelEditId] = useState<string | null>(null); // インラインラベル入力中のエリア
+  const [flow, setFlow] = useState<FlowState | null>(null); // {queue: [{name, department?}], total, history, registerToLedger} 名前リスト流し込み
   const [flowDialogOpen, setFlowDialogOpen] = useState(false);
-  const [linkSeatId, setLinkSeatId] = useState(null); // 台帳紐付けダイアログ対象の座席
+  const [linkSeatId, setLinkSeatId] = useState<string | null>(null); // 台帳紐付けダイアログ対象の座席
   const [memberPanelOpen, setMemberPanelOpen] = useState(false); // メンバー台帳は任意機能 (デフォルト閉)
-  const [popover, setPopover] = useState(null); // {seatId, x, y}
-  const [profileMemberId, setProfileMemberId] = useState(null);
-  const [memberDialog, setMemberDialog] = useState(null); // {member: Member|null}
+  const [popover, setPopover] = useState<PopoverState | null>(null); // {seatId, x, y}
+  const [profileMemberId, setProfileMemberId] = useState<string | null>(null);
+  const [memberDialog, setMemberDialog] = useState<{ member: Member | null } | null>(null); // {member: Member|null}
   const [csvOpen, setCsvOpen] = useState(false);
   const [dataIOOpen, setDataIOOpen] = useState(false);
   const [locManagerOpen, setLocManagerOpen] = useState(false);
-  const [dragGhost, setDragGhost] = useState(null); // {member, x, y}
-  const [toast, setToast] = useState(null);
+  const [dragGhost, setDragGhost] = useState<DragGhost | null>(null); // {member, x, y}
+  const [toast, setToast] = useState<ToastState | null>(null);
 
-  const imageInputRef = useRef(null);
-  const toastTimerRef = useRef(null);
-  const templateMenuRef = useRef(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const templateMenuRef = useRef<HTMLDivElement>(null);
 
   // コピペ用のアプリ内クリップボード ({seats, cx, cy, srcW, srcH})。OS クリップボードは使わない
-  const clipboardRef = useRef(null);
+  const clipboardRef = useRef<SeatClipboard | null>(null);
   // 連続ペーストのオフセット段数 (コピーでリセット)
   const pasteCountRef = useRef(0);
   // FloorMap 上のマウス位置 (相対座標)。キャンバス外は null。貼り付けの基準位置に使う
-  const cursorPosRef = useRef(null);
+  const cursorPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // ポーリング用に最新値を ref に保持
   const dirtyRef = useRef(dirty);
@@ -161,28 +225,28 @@ export default function App() {
   dataRef.current = data;
 
   // Undo/Redo 履歴 (data は不変更新なのでスナップショット参照の保持で軽量)
-  const undoStackRef = useRef([]);
-  const redoStackRef = useRef([]);
-  const lastCoalesceKeyRef = useRef(null);
+  const undoStackRef = useRef<(AppData | null)[]>([]);
+  const redoStackRef = useRef<(AppData | null)[]>([]);
+  const lastCoalesceKeyRef = useRef<string | null>(null);
 
-  const showToast = useCallback((msg, type = 'info') => {
+  const showToast = useCallback((msg: string, type: ToastState['type'] = 'info') => {
     clearTimeout(toastTimerRef.current);
     setToast({ msg, type });
     toastTimerRef.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
   // ---- 座席の選択 (複数選択対応)。座席選択とエリア選択は排他 ----
-  const selectSeat = useCallback((id) => {
+  const selectSeat = useCallback((id: string | null) => {
     setSelectedSeatIds(id ? new Set([id]) : new Set());
     setSelectedZoneId(null);
     setZoneLabelEditId(null);
   }, []);
-  const selectSeats = useCallback((ids) => {
+  const selectSeats = useCallback((ids: Iterable<string>) => {
     setSelectedSeatIds(new Set(ids));
     setSelectedZoneId(null);
     setZoneLabelEditId(null);
   }, []);
-  const toggleSeat = useCallback((id) => {
+  const toggleSeat = useCallback((id: string) => {
     setSelectedSeatIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -199,7 +263,7 @@ export default function App() {
   }, []);
 
   // ---- エリア (ゾーン) の選択。選択すると座席選択を解除 ----
-  const selectZone = useCallback((id) => {
+  const selectZone = useCallback((id: string | null) => {
     setSelectedZoneId(id);
     if (id) {
       setSelectedSeatIds(new Set());
@@ -224,7 +288,7 @@ export default function App() {
         setEtag(res.etag);
         setSessionName(res.name ?? '');
       } catch (e) {
-        if (!cancelled) setLoadError(e.message);
+        if (!cancelled) setLoadError((e as Error).message);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -236,7 +300,7 @@ export default function App() {
 
   // 未保存変更があるままタブを閉じる/リロードするときに確認ダイアログを出す
   useEffect(() => {
-    const h = (e) => {
+    const h = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current) {
         e.preventDefault();
         e.returnValue = '';
@@ -249,8 +313,8 @@ export default function App() {
   // テンプレートメニューの外側クリックで閉じる
   useEffect(() => {
     if (!templateMenuOpen) return;
-    const h = (e) => {
-      if (!templateMenuRef.current?.contains(e.target)) setTemplateMenuOpen(false);
+    const h = (e: PointerEvent) => {
+      if (!templateMenuRef.current?.contains(e.target as Node)) setTemplateMenuOpen(false);
     };
     window.addEventListener('pointerdown', h);
     return () => window.removeEventListener('pointerdown', h);
@@ -317,7 +381,7 @@ export default function App() {
   const searchActive = search.trim() !== '';
   const highlightIds = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const ids = new Set();
+    const ids = new Set<string>();
     if (!q) return ids;
     for (const s of locationSeats) {
       const m = s.memberId ? memberById.get(s.memberId) : null;
@@ -340,7 +404,7 @@ export default function App() {
   // ---- データ変更 (ローカル。保存ボタンでサーバーへ) ----
   // opts.coalesceKey: 直前の push と同じキーなら履歴を積まない (ドラッグ移動の集約用)
   // opts.skipHistory: Undo 履歴を積まない (undoFlow などの内部復元用)
-  const mutate = useCallback((fn, opts = {}) => {
+  const mutate = useCallback((fn: (d: AppData) => AppData, opts: MutateOpts = {}) => {
     if (!opts.skipHistory) {
       const key = opts.coalesceKey ?? null;
       if (!(key !== null && key === lastCoalesceKeyRef.current)) {
@@ -355,7 +419,7 @@ export default function App() {
       lastCoalesceKeyRef.current = null;
     }
     setData((d) => {
-      const next = fn(d);
+      const next = fn(d!);
       dataRef.current = next;
       return next;
     });
@@ -390,7 +454,7 @@ export default function App() {
     setNameEditSeatId(null);
   }, []);
 
-  const addLocation = (name) =>
+  const addLocation = (name: string) =>
     mutate((d) => {
       const order = d.locations.length
         ? Math.max(...d.locations.map((l) => l.order)) + 1
@@ -400,13 +464,13 @@ export default function App() {
       return { ...d, locations: [...d.locations, loc] };
     });
 
-  const renameLocation = (id, name) =>
+  const renameLocation = (id: string, name: string) =>
     mutate((d) => ({
       ...d,
       locations: d.locations.map((l) => (l.id === id ? { ...l, name } : l)),
     }));
 
-  const deleteLocation = (id) =>
+  const deleteLocation = (id: string) =>
     mutate((d) => ({
       ...d,
       locations: d.locations.filter((l) => l.id !== id),
@@ -414,7 +478,7 @@ export default function App() {
       zones: (d.zones ?? []).filter((z) => z.locationId !== id),
     }));
 
-  const moveLocation = (id, dir) =>
+  const moveLocation = (id: string, dir: number) =>
     mutate((d) => {
       const sorted = [...d.locations].sort((a, b) => a.order - b.order);
       const i = sorted.findIndex((l) => l.id === id);
@@ -430,17 +494,17 @@ export default function App() {
   // 図面の設定/差し替え。差し替えで縦横比が 1% 以上変わる場合は
   // 既存座席を contain フィットで再マッピングして大きなズレを防ぐ。
   // 戻り値: 座標補正を行ったかどうか
-  const setFloorImage = (locId, img) => {
+  const setFloorImage = (locId: string, img: CompressedFloorImage | null) => {
     const d0 = dataRef.current;
     const loc = d0?.locations.find((l) => l.id === locId);
     const oldW = loc?.imageWidth;
     const oldH = loc?.imageHeight;
-    let remap = null;
+    let remap: ((seat: Seat) => Seat) | null = null;
     if (
       img &&
       oldW &&
       oldH &&
-      d0.seats.some((s) => s.locationId === locId) &&
+      d0!.seats.some((s) => s.locationId === locId) &&
       Math.abs((img.width / img.height) / (oldW / oldH) - 1) > 0.01
     ) {
       const sc = Math.min(img.width / oldW, img.height / oldH);
@@ -473,13 +537,17 @@ export default function App() {
   };
 
   // 現在拠点の席1個分のサイズ (画像ピクセル換算。FloorMap の seatW と同じ基準)
-  const seatUnit = (loc) => {
+  const seatUnit = (loc: Location | null | undefined) => {
     const W = loc?.imageWidth ?? BLANK_CANVAS.width;
     return Math.min(150, Math.max(56, W / 16)) * (loc?.seatScale ?? 1);
   };
 
   // 座席を配置し、その場でインライン名前入力を開く (連続クリック配置の中核)
-  const addSeatAt = (x, y, { name = '', edit = true } = {}) => {
+  const addSeatAt = (
+    x: number,
+    y: number,
+    { name = '', edit = true }: { name?: string; edit?: boolean } = {}
+  ) => {
     if (!currentLocationId) return null;
     const seat = createSeat(currentLocationId, x, y, { name });
     mutate((d) => ({ ...d, seats: [...d.seats, seat] }));
@@ -489,7 +557,7 @@ export default function App() {
   };
 
   // 一列スタンプ配置: 相対座標の配列をまとめて追加 (Undo 1回で取り消せる)
-  const addSeatsAt = (points) => {
+  const addSeatsAt = (points: { x: number; y: number }[]) => {
     if (!currentLocationId || !points?.length) return;
     const newSeats = points.map((p) => createSeat(currentLocationId, p.x, p.y));
     mutate((d) => ({ ...d, seats: [...d.seats, ...newSeats] }));
@@ -500,13 +568,13 @@ export default function App() {
 
   // 既存座席のダブルクリック (または単一選択中の Enter): 選択 + インライン名前編集を開く
   // (シングルクリックは選択のみ。FloorMap 側で onSelectSeat が呼ばれる)
-  const handleSeatClick = (seatId) => {
+  const handleSeatClick = (seatId: string) => {
     selectSeat(seatId);
     setNameEditSeatId(seatId);
   };
 
   // Tab ジャンプ用: 読書順 (同じ行で次の x → 次の行の左端) で隣の席を解決する
-  const findNextSeat = (seat, dir) => {
+  const findNextSeat = (seat: Seat, dir: number): Seat | null => {
     const loc = currentLocation;
     const H = loc?.imageHeight ?? BLANK_CANVAS.height;
     const rowTol = (seatUnit(loc) * 0.62) / H; // 席1個分の高さを同一行の許容差とする
@@ -540,7 +608,7 @@ export default function App() {
   // 台帳メンバー紐付け済みの席で表示名と異なる名前を入力した場合は
   // 「直接入力で上書き」とみなし、紐付けを解除して name に保存する。
   // opts.advance (±1) があれば確定後に読書順で隣の席のインライン入力を開く (Tab 連続入力)。
-  const commitSeatName = (seatId, value, opts = {}) => {
+  const commitSeatName = (seatId: string, value: string, opts: { advance?: number } = {}) => {
     const trimmed = value.trim();
     setNameEditSeatId(null);
     const seat = dataRef.current?.seats.find((s) => s.id === seatId);
@@ -566,7 +634,7 @@ export default function App() {
   // ---- 名前リスト流し込みモード ----
   // queue のエントリは {name, department?}。registerToLedger が真なら
   // 部署付きエントリを台帳に登録して紐付け割り当て (部署色分けが即有効)。
-  const startFlow = (entries, registerToLedger = false) => {
+  const startFlow = (entries: FlowEntry[], registerToLedger = false) => {
     setFlow({ queue: entries, total: entries.length, history: [], registerToLedger });
     setFlowDialogOpen(false);
     setTool('select');
@@ -580,22 +648,22 @@ export default function App() {
   };
 
   // 先頭エントリを消費する。record を渡すと「1つ戻す」用の履歴に積む
-  const popFlowName = (record = null) => {
-    const entry = flow.queue[0];
-    const rest = flow.queue.slice(1);
-    const history = record ? [...flow.history, record] : flow.history;
+  const popFlowName = (record: FlowRecord | null = null) => {
+    const entry = flow!.queue[0];
+    const rest = flow!.queue.slice(1);
+    const history = record ? [...flow!.history, record] : flow!.history;
     if (rest.length === 0) {
       setFlow(null);
       showToast('リストの名前をすべて割り当てました');
     } else {
-      setFlow({ ...flow, queue: rest, history });
+      setFlow({ ...flow!, queue: rest, history });
     }
     return entry;
   };
 
   // 流し込みエントリの割り当て内容を解決 (1クリック割り当て/一括割り当てで共通)。
   // 台帳登録ありかつ部署付きなら member を新規生成して紐付け、それ以外は name 直書き。
-  const resolveFlowEntry = (entry) => {
+  const resolveFlowEntry = (entry: FlowEntry): { member: Member | null; patch: Partial<Seat> } => {
     if (entry.department && flow?.registerToLedger) {
       const member = createMember({ name: entry.name, department: entry.department });
       return { member, patch: { memberId: member.id, name: '' } };
@@ -604,13 +672,13 @@ export default function App() {
   };
 
   // 流し込み: 既存座席クリック → 次のエントリで上書き
-  const flowAssignSeat = (seatId) => {
+  const flowAssignSeat = (seatId: string) => {
     if (!flow || flow.queue.length === 0) return;
     const seat = dataRef.current?.seats.find((s) => s.id === seatId);
     if (!seat) return;
     const entry = flow.queue[0];
     const { member, patch } = resolveFlowEntry(entry);
-    const record = {
+    const record: FlowRecord = {
       type: 'assign',
       seatId,
       prevName: seat.name ?? '',
@@ -627,7 +695,7 @@ export default function App() {
   };
 
   // 流し込み: 空き場所クリック → 次のエントリで新規座席を配置
-  const flowPlaceAt = (x, y) => {
+  const flowPlaceAt = (x: number, y: number) => {
     if (!flow || flow.queue.length === 0 || !currentLocationId) return;
     const entry = flow.queue[0];
     const { member, patch } = resolveFlowEntry(entry);
@@ -649,7 +717,7 @@ export default function App() {
     const vacant = locationSeats.filter((s) => (s.name ?? '') === '' && !s.memberId);
     if (vacant.length === 0) return;
     // y 昇順に走査してトレランス内を同一行にグループ化 → (行, x) の読書順
-    const rows = [];
+    const rows: { y0: number; seats: Seat[] }[] = [];
     for (const s of [...vacant].sort((a, b) => a.y - b.y)) {
       const row = rows[rows.length - 1];
       if (row && Math.abs(s.y - row.y0) < rowTol) row.seats.push(s);
@@ -657,9 +725,9 @@ export default function App() {
     }
     const ordered = rows.flatMap((r) => r.seats.sort((a, b) => a.x - b.x));
     const count = Math.min(flow.queue.length, ordered.length);
-    const newMembers = [];
-    const patchById = new Map();
-    const items = [];
+    const newMembers: Member[] = [];
+    const patchById = new Map<string, Partial<Seat>>();
+    const items: FlowAssignRecord[] = [];
     for (let i = 0; i < count; i++) {
       const entry = flow.queue[i];
       const seat = ordered[i];
@@ -756,7 +824,7 @@ export default function App() {
     // type 'skip' はデータ変更なし (キューに戻すだけ)
   };
 
-  const updateSeat = (id, patch, opts) =>
+  const updateSeat = (id: string, patch: Partial<Seat>, opts?: MutateOpts) =>
     mutate(
       (d) => ({
         ...d,
@@ -766,17 +834,19 @@ export default function App() {
     );
 
   // ドラッグ移動は coalesceKey で Undo 履歴を 1 ステップに集約
-  const moveSeat = (id, x, y) => updateSeat(id, { x, y }, { coalesceKey: 'move:' + id });
+  const moveSeat = (id: string, x: number, y: number) =>
+    updateSeat(id, { x, y }, { coalesceKey: 'move:' + id });
 
   // リサイズハンドルのドラッグ (w/h と中心座標を同時更新)。Undo 1 ステップに集約
-  const resizeSeat = (id, patch) => updateSeat(id, patch, { coalesceKey: 'resize:' + id });
+  const resizeSeat = (id: string, patch: Partial<Seat>) =>
+    updateSeat(id, patch, { coalesceKey: 'resize:' + id });
 
   // 回転ハンドルのドラッグ。Undo 1 ステップに集約
-  const rotateSeatTo = (id, rotation) =>
+  const rotateSeatTo = (id: string, rotation: number) =>
     updateSeat(id, { rotation }, { coalesceKey: 'rotate:' + id });
 
   // 複数席の一括移動 (1回の mutate + coalesceKey で Undo 1回に集約)
-  const moveSeats = (moves) => {
+  const moveSeats = (moves: { id: string; x: number; y: number }[]) => {
     if (!moves?.length) return;
     const byId = new Map(moves.map((m) => [m.id, m]));
     mutate(
@@ -792,11 +862,11 @@ export default function App() {
   };
 
   // 複製: 席の向きを考慮して隣 (回転90°系なら下) に配置し、すぐ名前入力を開く
-  const duplicateSeat = (id) => {
+  const duplicateSeat = (id: string) => {
     const d0 = dataRef.current;
     const src = d0?.seats.find((s) => s.id === id);
     if (!src) return;
-    const loc = d0.locations.find((l) => l.id === src.locationId);
+    const loc = d0!.locations.find((l) => l.id === src.locationId);
     const W = loc?.imageWidth ?? BLANK_CANVAS.width;
     const H = loc?.imageHeight ?? BLANK_CANVAS.height;
     const vertical = (((src.rotation ?? 0) % 180) + 180) % 180 === 90;
@@ -818,12 +888,12 @@ export default function App() {
 
   // 島ごと複製: 選択席群を bounding box 幅 + 席1個分だけ右にずらしてコピー。
   // 名前はクリアし、複製側を選択状態にしてそのままドラッグで配置できるようにする。
-  const duplicateSeats = (ids) => {
+  const duplicateSeats = (ids: Set<string> | string[]) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const d0 = dataRef.current;
     const targets = d0?.seats.filter((s) => set.has(s.id)) ?? [];
     if (!targets.length) return;
-    const loc = d0.locations.find((l) => l.id === targets[0].locationId);
+    const loc = d0!.locations.find((l) => l.id === targets[0].locationId);
     const W = loc?.imageWidth ?? BLANK_CANVAS.width;
     const minX = Math.min(...targets.map((s) => s.x));
     const maxX = Math.max(...targets.map((s) => s.x));
@@ -843,7 +913,7 @@ export default function App() {
   };
 
   // 一括削除 (1回の mutate = Undo 1回)
-  const deleteSeats = (ids) => {
+  const deleteSeats = (ids: Set<string> | string[]) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     if (set.size === 0) return;
     mutate((d) => ({ ...d, seats: d.seats.filter((s) => !set.has(s.id)) }));
@@ -851,16 +921,16 @@ export default function App() {
     setNameEditSeatId(null);
   };
 
-  const deleteSeat = (id) => deleteSeats([id]);
+  const deleteSeat = (id: string) => deleteSeats([id]);
 
   // ---- コピー & ペースト (Cmd/Ctrl+C / V。アプリ内クリップボード) ----
   // 選択席のスナップショットと bounding box 中心・コピー元の図面サイズを保持する
-  const copySeats = (ids) => {
+  const copySeats = (ids: Set<string> | string[]) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const d0 = dataRef.current;
     const targets = d0?.seats.filter((s) => set.has(s.id)) ?? [];
     if (!targets.length) return;
-    const loc = d0.locations.find((l) => l.id === targets[0].locationId);
+    const loc = d0!.locations.find((l) => l.id === targets[0].locationId);
     clipboardRef.current = {
       seats: targets.map((s) => ({ ...s })),
       cx: (Math.min(...targets.map((s) => s.x)) + Math.max(...targets.map((s) => s.x))) / 2,
@@ -878,7 +948,7 @@ export default function App() {
   const pasteSeats = () => {
     const clip = clipboardRef.current;
     if (!clip?.seats?.length || !currentLocationId) return;
-    const loc = dataRef.current.locations.find((l) => l.id === currentLocationId);
+    const loc = dataRef.current!.locations.find((l) => l.id === currentLocationId);
     const W = loc?.imageWidth ?? BLANK_CANVAS.width;
     const H = loc?.imageHeight ?? BLANK_CANVAS.height;
     const unit = seatUnit(loc);
@@ -886,8 +956,8 @@ export default function App() {
     const stepX = (unit * 1.1) / W;
     const stepY = (unit * 0.62 * 1.1) / H;
     const cur = cursorPosRef.current;
-    let cx;
-    let cy;
+    let cx: number;
+    let cy: number;
     if (cur && cur.x >= 0 && cur.x <= 1 && cur.y >= 0 && cur.y <= 1) {
       // カーソル位置基準。同じ場所への連続ペーストは席1個分ずつ右下へずらす
       cx = cur.x + n * stepX;
@@ -915,9 +985,9 @@ export default function App() {
   // ---- 机テンプレート ----
   // クリック位置を中心にテンプレートの席一式を配置 (1 mutate = Undo 1回)。
   // dx は席ユニット幅、dy は席ユニット高さ (幅×0.62) 単位 (SEAT_TEMPLATES 参照)
-  const addTemplateAt = (x, y) => {
+  const addTemplateAt = (x: number, y: number) => {
     if (!template || !currentLocationId) return;
-    const loc = dataRef.current.locations.find((l) => l.id === currentLocationId);
+    const loc = dataRef.current!.locations.find((l) => l.id === currentLocationId);
     const W = loc?.imageWidth ?? BLANK_CANVAS.width;
     const H = loc?.imageHeight ?? BLANK_CANVAS.height;
     const unit = seatUnit(loc);
@@ -940,7 +1010,7 @@ export default function App() {
 
   // ---- エリア (ゾーン) ----
   // エリアツールのドラッグ確定: エリアを追加し、その場でインラインラベル入力を開く
-  const addZoneAt = (rect) => {
+  const addZoneAt = (rect: { x: number; y: number; w: number; h: number }) => {
     if (!currentLocationId) return;
     const zone = createZone(currentLocationId, rect);
     mutate((d) => ({ ...d, zones: [...(d.zones ?? []), zone] }));
@@ -949,7 +1019,7 @@ export default function App() {
     setZoneLabelEditId(zone.id);
   };
 
-  const updateZone = (id, patch, opts) =>
+  const updateZone = (id: string, patch: Partial<Zone>, opts?: MutateOpts) =>
     mutate(
       (d) => ({
         ...d,
@@ -959,17 +1029,19 @@ export default function App() {
     );
 
   // ドラッグ移動・リサイズは coalesceKey で Undo 履歴を 1 ステップに集約
-  const moveZone = (id, x, y) => updateZone(id, { x, y }, { coalesceKey: 'zone-move:' + id });
-  const resizeZone = (id, rect) => updateZone(id, rect, { coalesceKey: 'zone-resize:' + id });
+  const moveZone = (id: string, x: number, y: number) =>
+    updateZone(id, { x, y }, { coalesceKey: 'zone-move:' + id });
+  const resizeZone = (id: string, rect: Partial<Zone>) =>
+    updateZone(id, rect, { coalesceKey: 'zone-resize:' + id });
 
-  const deleteZone = (id) => {
+  const deleteZone = (id: string) => {
     mutate((d) => ({ ...d, zones: (d.zones ?? []).filter((z) => z.id !== id) }));
     setSelectedZoneId(null);
     setZoneLabelEditId(null);
   };
 
   // インラインラベル入力の確定
-  const commitZoneLabel = (id, value) => {
+  const commitZoneLabel = (id: string, value: string) => {
     setZoneLabelEditId(null);
     const zone = dataRef.current?.zones?.find((z) => z.id === id);
     if (!zone) return;
@@ -978,7 +1050,7 @@ export default function App() {
   };
 
   // 整列: 左揃え (min x) / 上揃え (min y)
-  const alignSeats = (ids, type) => {
+  const alignSeats = (ids: Set<string> | string[], type: 'left' | 'top') => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 2) return;
@@ -998,7 +1070,7 @@ export default function App() {
   };
 
   // 席の軸方向の見た目サイズ (px)。回転を考慮した bbox 幅/高さ
-  const seatExtentPx = (s, unit, axis) => {
+  const seatExtentPx = (s: Seat, unit: number, axis: 'x' | 'y') => {
     const pw = unit * (s.w ?? 1);
     const ph = unit * 0.62 * (s.h ?? 1);
     const rad = (((s.rotation ?? 0) % 360) * Math.PI) / 180;
@@ -1011,7 +1083,7 @@ export default function App() {
   // 全席の中心を均等割りすると 2 次元の島選択で列/行が崩れて席が重なるため、
   // 同じ列(x)/行(y)の席はクラスタとしてまとめて動かし、
   // クラスタ間の「余白」(席サイズ・回転込みの端から端) が均等になるよう配分する
-  const distributeSeats = (ids, axis) => {
+  const distributeSeats = (ids: Set<string> | string[], axis: 'x' | 'y') => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 3) return;
@@ -1022,9 +1094,17 @@ export default function App() {
     const D = axis === 'x' ? W : H;
 
     // 中心座標が近い席を同一クラスタ (列/行) にまとめる
+    interface Cluster {
+      seats: Seat[];
+      lastCenter: number;
+      left: number;
+      right: number;
+      center: number;
+      size: number;
+    }
     const tol = (axis === 'x' ? unit : unit * 0.62) * 0.5;
     const sorted = [...targets].sort((a, b) => a[axis] - b[axis]);
-    const clusters = [];
+    const clusters: Cluster[] = [];
     for (const s of sorted) {
       const c = s[axis] * D;
       const last = clusters[clusters.length - 1];
@@ -1032,7 +1112,7 @@ export default function App() {
         last.seats.push(s);
         last.lastCenter = c;
       } else {
-        clusters.push({ seats: [s], lastCenter: c });
+        clusters.push({ seats: [s], lastCenter: c } as Cluster);
       }
     }
     if (clusters.length < 2) return;
@@ -1056,7 +1136,7 @@ export default function App() {
     const minGap = unit * 0.08;
     const gap = Math.max((span - sumSize) / (clusters.length - 1), minGap);
 
-    const delta = new Map();
+    const delta = new Map<string, number>();
     let cursor = clusters[0].left;
     for (const cl of clusters) {
       const d = cursor + cl.size / 2 - cl.center;
@@ -1067,7 +1147,7 @@ export default function App() {
       ...d,
       seats: d.seats.map((s) =>
         delta.has(s.id)
-          ? { ...s, [axis]: Math.min(1, Math.max(0, (s[axis] * D + delta.get(s.id)) / D)) }
+          ? { ...s, [axis]: Math.min(1, Math.max(0, (s[axis] * D + delta.get(s.id)!) / D)) }
           : s
       ),
     }));
@@ -1075,7 +1155,7 @@ export default function App() {
 
   // 机間の余白調整: 選択全体の中心から各席中心までの距離を拡縮する
   // (連打を 1 Undo ステップに集約するため coalesceKey を使用)
-  const adjustSeatGaps = (ids, factor) => {
+  const adjustSeatGaps = (ids: Set<string> | string[], factor: number) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 2) return;
@@ -1105,7 +1185,7 @@ export default function App() {
 
   // 一括回転 (R キー / ツールバーの 90°回転)。
   // 2席以上の選択は個別回転ではなく、選択全体を1つの塊として bbox 中心の周りで回す
-  const rotateSeats = (ids, deg) => {
+  const rotateSeats = (ids: Set<string> | string[], deg: number) => {
     const set = ids instanceof Set ? ids : new Set(ids);
     if (set.size === 0) return;
     const loc = currentLocation;
@@ -1113,7 +1193,7 @@ export default function App() {
     const H = loc?.imageHeight ?? BLANK_CANVAS.height;
     mutate((d) => {
       const targets = d.seats.filter((s) => set.has(s.id));
-      let posMap = null;
+      let posMap: Map<string, { x: number; y: number }> | null = null;
       if (targets.length >= 2) {
         // 相対座標のまま回すと図面の縦横比で歪むため、ピクセル空間で回転する
         const xs = targets.map((s) => s.x * W);
@@ -1153,7 +1233,7 @@ export default function App() {
   };
 
   // 席サイズの手動調整 (拠点ごとの倍率。0.4〜2.0、step 0.1)
-  const changeSeatScale = (delta) => {
+  const changeSeatScale = (delta: number) => {
     if (!currentLocationId) return;
     mutate(
       (d) => ({
@@ -1182,8 +1262,8 @@ export default function App() {
   //   R: 選択席を 90° 回転
   //   Esc: 流し込み/クリック配置/エリア描画/テンプレート配置モードを終了 (インライン入力中の Esc は入力側で処理)
   useEffect(() => {
-    const onKey = (e) => {
-      const tag = e.target?.tagName;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
       const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         if (inField) return;
@@ -1258,7 +1338,7 @@ export default function App() {
   }, [flow, tool, mode, selectedSeatIds, selectedZoneId, nameEditSeatId, currentLocationId, showToast, undo, redo]);
 
   // 台帳メンバーとの紐付け解除。直接入力名が無ければ表示名を引き継ぐ (席のラベルが消えないように)
-  const unassignSeat = (seatId) =>
+  const unassignSeat = (seatId: string) =>
     mutate((d) => ({
       ...d,
       seats: d.seats.map((s) => {
@@ -1270,13 +1350,13 @@ export default function App() {
     }));
 
   // 台帳メンバーと席の紐付け (紐付けダイアログから)。スワップ処理は dropMemberOnSeat に委譲
-  const linkMemberToSeat = (seatId, memberId) => {
+  const linkMemberToSeat = (seatId: string, memberId: string) => {
     dropMemberOnSeat(memberId, seatId);
     setLinkSeatId(null);
   };
 
   // 席の直接入力名を台帳へ新規登録して紐付け
-  const registerAndLinkMember = (seatId, name) => {
+  const registerAndLinkMember = (seatId: string, name: string) => {
     const member = createMember({ name });
     mutate((d) => ({
       ...d,
@@ -1288,7 +1368,7 @@ export default function App() {
   };
 
   // メンバーを座席へドロップ: 割り当て / 移動 / 入れ替え (スワップ)
-  const dropMemberOnSeat = (memberId, seatId) =>
+  const dropMemberOnSeat = (memberId: string, seatId: string) =>
     mutate((d) => {
       const target = d.seats.find((s) => s.id === seatId);
       if (!target) return d;
@@ -1308,7 +1388,7 @@ export default function App() {
       };
     });
 
-  const importMembers = (list) => {
+  const importMembers = (list: Partial<Member>[]) => {
     mutate((d) => ({
       ...d,
       members: [...d.members, ...list.map((attrs) => createMember(attrs))],
@@ -1316,7 +1396,7 @@ export default function App() {
     showToast(`${list.length} 件のメンバーを取り込みました。「保存」で確定してください。`);
   };
 
-  const handleMemberSave = (attrs) => {
+  const handleMemberSave = (attrs: Partial<Member>) => {
     const editing = memberDialog?.member;
     if (editing) {
       mutate((d) => ({
@@ -1329,7 +1409,7 @@ export default function App() {
     setMemberDialog(null);
   };
 
-  const handleMemberDelete = (id) => {
+  const handleMemberDelete = (id: string) => {
     mutate((d) => ({
       ...d,
       members: d.members.filter((m) => m.id !== id),
@@ -1338,7 +1418,7 @@ export default function App() {
     setMemberDialog(null);
   };
 
-  const replaceAll = (normalized) => {
+  const replaceAll = (normalized: AppData) => {
     clearHistory();
     setData(normalized);
     setDirty(true);
@@ -1367,7 +1447,7 @@ export default function App() {
         showToast('保存しました');
       }
     } catch (e) {
-      showToast(e.message, 'error');
+      showToast((e as Error).message, 'error');
     } finally {
       setSaving(false);
     }
@@ -1377,10 +1457,10 @@ export default function App() {
     if (!conflict) return;
     setSaving(true);
     try {
-      const payload = { ...data, updatedAt: new Date().toISOString() };
-      const result = await saveSession(sessionId, payload, conflict.latestEtag);
+      const payload = { ...data!, updatedAt: new Date().toISOString() };
+      const result = await saveSession(sessionId!, payload, conflict.latestEtag);
       if (result.conflict) {
-        const latest = await loadSession(sessionId);
+        const latest = await loadSession(sessionId!);
         setConflict({
           latestEtag: latest.etag,
           latestData: normalizeData(latest.session),
@@ -1394,7 +1474,7 @@ export default function App() {
         showToast('上書き保存しました');
       }
     } catch (e) {
-      showToast(e.message, 'error');
+      showToast((e as Error).message, 'error');
     } finally {
       setSaving(false);
     }
@@ -1426,13 +1506,13 @@ export default function App() {
       setPopover(null);
       showToast('最新データを読み込みました');
     } catch (e) {
-      showToast(e.message, 'error');
+      showToast((e as Error).message, 'error');
     }
   }
 
   // プロフィール編集 (閲覧モード): saveWithRetry でサーバーの最新へマージ保存
-  async function handleProfileSave(memberId, fields) {
-    const { etag: newEtag, data: newData } = await saveWithRetry(sessionId, (session) => {
+  async function handleProfileSave(memberId: string, fields: Partial<Member>) {
+    const { etag: newEtag, data: newData } = await saveWithRetry(sessionId!, (session) => {
       const cur = normalizeData(session);
       return {
         ...cur,
@@ -1443,8 +1523,8 @@ export default function App() {
     if (dirtyRef.current) {
       // ローカルに未保存の編集がある場合はローカル側にも同じ変更を反映しておく
       setData((d) => ({
-        ...d,
-        members: d.members.map((m) => (m.id === memberId ? { ...m, ...fields } : m)),
+        ...d!,
+        members: d!.members.map((m) => (m.id === memberId ? { ...m, ...fields } : m)),
       }));
     } else {
       setData(normalizeData(newData));
@@ -1454,10 +1534,10 @@ export default function App() {
   }
 
   // 図面ファイル (画像/PDF) の取り込み本体。ファイル選択とキャンバスへの D&D の両方から呼ばれる
-  async function processImageFile(file) {
+  async function processImageFile(file: File) {
     if (!file || !currentLocationId) return;
     try {
-      let source = file;
+      let source: Blob = file;
       let pdfNote = '';
       if (isPdfFile(file)) {
         // PDF はクライアント側で 1 ページ目を画像化してから圧縮に流す
@@ -1482,7 +1562,7 @@ export default function App() {
         );
       }
     } catch (err) {
-      showToast(err.message, 'error');
+      showToast((err as Error).message, 'error');
     }
   }
 
@@ -1705,7 +1785,7 @@ export default function App() {
                   size="sm"
                   onClick={() => {
                     if (confirm('図面画像を削除して無地キャンバスに戻しますか？(座席は残ります)')) {
-                      setFloorImage(currentLocationId, null);
+                      setFloorImage(currentLocationId!, null);
                     }
                   }}
                 >
@@ -1917,7 +1997,7 @@ export default function App() {
               onResizeSeat={resizeSeat}
               onRotateSeat={rotateSeatTo}
               onSeatTap={(seatId, x, y) => {
-                setPopover(seatId ? { seatId, x, y } : null);
+                setPopover(seatId ? { seatId, x: x!, y: y! } : null);
               }}
               onAddSeatAt={addSeatAt}
               onAddSeatsAt={addSeatsAt}
@@ -1994,7 +2074,7 @@ export default function App() {
       {/* 閲覧モード: 座席詳細ポップオーバー */}
       {mode === 'view' && popoverSeat ? (
         <SeatDetailPopover
-          anchor={{ x: popover.x, y: popover.y }}
+          anchor={{ x: popover!.x, y: popover!.y }}
           seat={popoverSeat}
           member={popoverMember}
           colorMap={colorMap}
@@ -2075,8 +2155,8 @@ export default function App() {
         members={data?.members ?? []}
         colorMap={colorMap}
         onClose={() => setLinkSeatId(null)}
-        onLink={(memberId) => linkMemberToSeat(linkSeatId, memberId)}
-        onRegisterAndLink={(name) => registerAndLinkMember(linkSeatId, name)}
+        onLink={(memberId) => linkMemberToSeat(linkSeatId!, memberId)}
+        onRegisterAndLink={(name) => registerAndLinkMember(linkSeatId!, name)}
       />
 
       {/* 保存競合ダイアログ */}

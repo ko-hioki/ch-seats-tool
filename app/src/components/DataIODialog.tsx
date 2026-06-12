@@ -8,13 +8,21 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { normalizeData } from '@/lib/model';
+import { normalizeData, type AppData } from '@/lib/model';
+
+interface DataIODialogProps {
+  open: boolean;
+  onClose: () => void;
+  data: AppData | null;
+  sessionName: string;
+  onImport: (data: AppData) => void;
+}
 
 /**
  * データ管理ダイアログ: JSON エクスポート/インポート (バックアップ・移行用) と運用ガイド。
  */
-export default function DataIODialog({ open, onClose, data, sessionName, onImport }) {
-  const fileRef = useRef(null);
+export default function DataIODialog({ open, onClose, data, sessionName, onImport }: DataIODialogProps) {
+  const fileRef = useRef<HTMLInputElement>(null);
 
   function handleExport() {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -27,7 +35,7 @@ export default function DataIODialog({ open, onClose, data, sessionName, onImpor
     URL.revokeObjectURL(url);
   }
 
-  async function handleImportFile(e) {
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;

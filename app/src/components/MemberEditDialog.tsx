@@ -13,14 +13,40 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { compressIconImage } from '@/lib/image';
+import type { Member } from '@/lib/model';
+
+interface MemberForm {
+  name: string;
+  nickname: string;
+  department: string;
+  icon: string | null;
+  slackUserId: string;
+  note: string;
+}
+
+type MemberFormTextField = Exclude<keyof MemberForm, 'icon'>;
+
+interface MemberEditDialogProps {
+  open: boolean;
+  member: Member | null;
+  onClose: () => void;
+  onSave: (attrs: Partial<Member>) => void;
+  onDelete: (id: string) => void;
+}
 
 /**
  * メンバーの追加・編集ダイアログ (編集モードの名簿管理用)
  * member が null の場合は新規追加。
  */
-export default function MemberEditDialog({ open, member, onClose, onSave, onDelete }) {
-  const [form, setForm] = useState(null);
-  const fileRef = useRef(null);
+export default function MemberEditDialog({
+  open,
+  member,
+  onClose,
+  onSave,
+  onDelete,
+}: MemberEditDialogProps) {
+  const [form, setForm] = useState<MemberForm | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const isNew = !member?.id;
 
   useEffect(() => {
@@ -38,31 +64,34 @@ export default function MemberEditDialog({ open, member, onClose, onSave, onDele
 
   if (!form) return null;
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const set =
+    (k: MemberFormTextField) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setForm((f) => ({ ...f!, [k]: e.target.value }));
 
-  async function onIconFile(e) {
+  async function onIconFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
     try {
       const dataUrl = await compressIconImage(file);
-      setForm((f) => ({ ...f, icon: dataUrl }));
+      setForm((f) => ({ ...f!, icon: dataUrl }));
     } catch (err) {
-      alert(err.message);
+      alert((err as Error).message);
     }
   }
 
   function handleSave() {
-    if (!form.name.trim() && !form.nickname.trim()) {
+    if (!form!.name.trim() && !form!.nickname.trim()) {
       alert('本名またはあだ名を入力してください');
       return;
     }
     onSave({
-      ...form,
-      name: form.name.trim(),
-      nickname: form.nickname.trim(),
-      department: form.department.trim(),
-      slackUserId: form.slackUserId.trim() || null,
+      ...form!,
+      name: form!.name.trim(),
+      nickname: form!.nickname.trim(),
+      department: form!.department.trim(),
+      slackUserId: form!.slackUserId.trim() || null,
     });
   }
 
@@ -105,7 +134,7 @@ export default function MemberEditDialog({ open, member, onClose, onSave, onDele
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setForm((f) => ({ ...f, icon: null }))}
+                  onClick={() => setForm((f) => ({ ...f!, icon: null }))}
                 >
                   <X /> 削除
                 </Button>
@@ -142,7 +171,7 @@ export default function MemberEditDialog({ open, member, onClose, onSave, onDele
               className="sm:mr-auto"
               onClick={() => {
                 if (confirm('このメンバーを削除しますか？座席の割り当ても解除されます。')) {
-                  onDelete(member.id);
+                  onDelete(member!.id);
                 }
               }}
             >

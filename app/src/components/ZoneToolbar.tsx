@@ -3,12 +3,19 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ZONE_COLORS } from '@/lib/colors';
 import { cn } from '@/lib/utils';
+import type { Zone } from '@/lib/model';
+
+interface ZoneToolbarProps {
+  zone: Zone | null;
+  onUpdateZone: (id: string, patch: Partial<Zone>, opts?: { coalesceKey?: string }) => void;
+  onDelete: (id: string) => void;
+}
 
 /**
  * 編集モードでエリア (ゾーン) 選択時に表示するツールバー。
  * ラベル編集・プリセットカラー選択・削除。
  */
-export default function ZoneToolbar({ zone, onUpdateZone, onDelete }) {
+export default function ZoneToolbar({ zone, onUpdateZone, onDelete }: ZoneToolbarProps) {
   if (!zone) return null;
   return (
     <div className="flex flex-wrap items-center gap-2 border-b bg-amber-50/80 px-3 py-2">

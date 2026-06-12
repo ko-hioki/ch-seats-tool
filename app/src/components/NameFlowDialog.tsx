@@ -14,6 +14,18 @@ import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { parseTable, guessMapping } from '@/lib/csv';
 
+/** 流し込みの 1 エントリ */
+export interface FlowEntry {
+  name: string;
+  department?: string;
+}
+
+interface NameFlowDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onStart: (entries: FlowEntry[], registerToLedger: boolean) => void;
+}
+
 /**
  * 名前リスト流し込みモードの開始ダイアログ。
  * - 改行区切りの名前リスト: 従来どおり名前のみを順に割り当てる
@@ -21,10 +33,10 @@ import { parseTable, guessMapping } from '@/lib/csv';
  *   部署列を選ぶと「台帳にも登録して部署色分けを有効化」を選択できる。
  * onStart には [{name, department?}] と registerToLedger フラグを渡す。
  */
-export default function NameFlowDialog({ open, onClose, onStart }) {
+export default function NameFlowDialog({ open, onClose, onStart }: NameFlowDialogProps) {
   const [text, setText] = useState('');
-  const [nameColSel, setNameColSel] = useState(null); // null = 推定値を使用
-  const [deptColSel, setDeptColSel] = useState(null); // null = 推定値 / -1 = 使わない
+  const [nameColSel, setNameColSel] = useState<number | null>(null); // null = 推定値を使用
+  const [deptColSel, setDeptColSel] = useState<number | null>(null); // null = 推定値 / -1 = 使わない
   const [register, setRegister] = useState(true);
 
   const parsed = useMemo(() => {
@@ -52,7 +64,7 @@ export default function NameFlowDialog({ open, onClose, onStart }) {
   const deptColRaw = deptColSel ?? parsed.guessedDept;
   const deptCol = deptColRaw >= colCount ? -1 : deptColRaw;
 
-  const entries = useMemo(() => {
+  const entries = useMemo<FlowEntry[]>(() => {
     if (!parsed.multiCol) {
       return parsed.rows
         .map((r) => ({ name: (r[0] ?? '').trim() }))
@@ -80,7 +92,7 @@ export default function NameFlowDialog({ open, onClose, onStart }) {
     reset();
   }
 
-  const colLabel = (i) =>
+  const colLabel = (i: number) =>
     `列${i + 1}${parsed.hasHeader && parsed.rows[0]?.[i] ? `: ${parsed.rows[0][i]}` : ''}`;
 
   return (
