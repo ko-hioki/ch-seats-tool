@@ -16,6 +16,16 @@ import { departmentColor, zoneColor, type DepartmentColor } from '@/lib/colors';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
+// ---- コンボボックス候補の型 ----
+/** ドロップダウンの1候補 */
+interface MemberCandidate {
+  member: Member;
+  /** 他の席に割り当て済みなら真 */
+  assigned: boolean;
+  /** 事業部色 */
+  color: DepartmentColor | null;
+}
+
 interface SeatStyle {
   background: string;
   borderColor: string;
@@ -51,6 +61,8 @@ interface SeatNodeProps {
   highlighted: boolean | undefined;
   dimmed: boolean;
   nameMode: NameMode;
+  /** 検索サジェストで選択された直後のパルス強調 */
+  pulsing?: boolean;
 }
 
 function SeatNode({
@@ -65,6 +77,7 @@ function SeatNode({
   highlighted,
   dimmed,
   nameMode,
+  pulsing = false,
 }: SeatNodeProps) {
   const displayName = seatDisplayName(seat, member, nameMode);
   // 退職メンバーが席に紐付いたまま: 警告色の枠 + 名前に取り消し線で注意喚起
@@ -79,6 +92,15 @@ function SeatNode({
     };
   } else if (member) {
     const c = departmentColor(colorMap, memberColorKey(member));
+    style = {
+      background: c.bg,
+      borderColor: c.border,
+      borderStyle: seat.type === 'free' ? 'dashed' : 'solid',
+      color: c.text,
+    };
+  } else if (seat.division) {
+    // メンバー紐付けなしで事業部が直接設定されている場合: 事業部色で塗る
+    const c = departmentColor(colorMap, seat.division);
     style = {
       background: c.bg,
       borderColor: c.border,
@@ -107,6 +129,7 @@ function SeatNode({
         'absolute flex flex-col items-center justify-center rounded-md border-2 overflow-hidden cursor-pointer shadow-sm',
         selected && 'ring-4 ring-blue-500/70 z-20',
         highlighted && 'ring-4 ring-yellow-400 z-10',
+        pulsing && !selected && !highlighted && 'z-25',
         dimmed && 'opacity-25'
       )}
       style={{
@@ -123,6 +146,12 @@ function SeatNode({
         borderStyle: style.borderStyle,
       }}
     >
+      {pulsing ? (
+        <div
+          className="pointer-events-none absolute inset-0 rounded-md"
+          style={{ animation: 'seat-focus-pulse 0.6s ease-out 3', outline: '3px solid #facc15', outlineOffset: '2px' }}
+        />
+      ) : null}
       {seat.label ? (
         <div
           className="leading-none opacity-70 pointer-events-none max-w-full truncate px-0.5"
@@ -154,6 +183,7 @@ function SeatNode({
   );
 }
 
+
 interface InlineNameInputProps {
   left: number;
   top: number;
@@ -162,11 +192,30 @@ interface InlineNameInputProps {
   placeholder?: string;
   onCommit: (value: string, opts?: { advance?: number }) => void;
   onCancel: () => void;
+  /** コンボボックス候補 (配置モード・流し込みモード中は空配列で渡して非表示) */
+  candidates?: MemberCandidate[];
+  /** 台帳メンバー選択時のコールバック */
+  onSelectMember?: (member: Member) => void;
+  /** コンテナ要素の高さ (画面下端付近で上方向にドロップダウンを出すために使用) */
+  containerHeight?: number;
+}
+
+/** 事業部ドット (候補リスト内の色インジケータ) */
+function DivisionDot({ color }: { color: DepartmentColor | null }) {
+  if (!color) return <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-slate-300" />;
+  return (
+    <span
+      className="inline-block h-2 w-2 shrink-0 rounded-full"
+      style={{ background: color.border }}
+    />
+  );
 }
 
 /**
- * 座席の上に重ねて表示するインライン名前入力。
+ * 座席の上に重ねて表示するインライン名前入力 (コンボボックス対応版)。
  * Enter で確定 / Tab で確定して隣の席へ (Shift+Tab で逆方向) / Esc でキャンセル / フォーカスを外すと確定。
+ * candidates が 1 件以上あれば入力テキストで絞り込んだ候補ドロップダウンを表示する。
+ * ↓/↑ で候補ハイライト移動 → Enter で台帳メンバー選択、ハイライトなし Enter は直書き確定。
  */
 function InlineNameInput({
   left,
@@ -176,8 +225,12 @@ function InlineNameInput({
   placeholder = '名前を入力',
   onCommit,
   onCancel,
+  candidates = [],
+  onSelectMember,
+  containerHeight,
 }: InlineNameInputProps) {
   const [value, setValue] = useState(initial);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const doneRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -186,36 +239,195 @@ function InlineNameInput({
     inputRef.current?.select();
   }, []);
 
+  // 入力テキストで候補を絞り込む
+  const filtered = useMemo<MemberCandidate[]>(() => {
+    if (candidates.length === 0) return [];
+    const q = value.trim().toLowerCase();
+    if (!q) {
+      // 空入力: 未割り当てメンバーを優先して先頭に、最大8件
+      const unassigned = candidates.filter((c) => !c.assigned);
+      const assigned = candidates.filter((c) => c.assigned);
+      return [...unassigned, ...assigned].slice(0, 8);
+    }
+    return candidates.filter((c) => {
+      const name = (c.member.name ?? '').toLowerCase();
+      const nick = (c.member.nickname ?? '').toLowerCase();
+      return name.includes(q) || nick.includes(q);
+    }).slice(0, 10);
+  }, [candidates, value]);
+
+  // 絞り込み結果が変わったらハイライトをリセット
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [value]);
+
   const commit = (opts?: { advance?: number }) => {
     if (doneRef.current) return;
     doneRef.current = true;
     onCommit(value, opts);
   };
 
+  const selectCandidate = (candidate: MemberCandidate) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onSelectMember?.(candidate.member);
+  };
+
+  // ドロップダウンを画面下端で上向きに出すか判定
+  const dropUp = containerHeight != null && top + 8 + filtered.length * 36 + 40 > containerHeight;
+
   return (
-    <input
-      ref={inputRef}
-      className="absolute z-40 -translate-x-1/2 -translate-y-1/2 rounded-md border-2 border-blue-500 bg-white px-2 py-1.5 text-sm font-bold text-slate-900 shadow-xl outline-none"
+    <div
+      className="absolute z-40 -translate-x-1/2 -translate-y-1/2"
+      style={{ left, top, width }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+    >
+      <input
+        ref={inputRef}
+        className="w-full rounded-md border-2 border-blue-500 bg-white px-2 py-1.5 text-sm font-bold text-slate-900 shadow-xl outline-none"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => {
+          setValue(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (filtered.length > 0) setActiveIndex((i) => Math.min(i + 1, filtered.length - 1));
+            return;
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setActiveIndex((i) => Math.max(i - 1, -1));
+            return;
+          }
+          if (e.key === 'Enter') {
+            if (e.nativeEvent.isComposing) return; // IME 変換確定の Enter は無視
+            if (activeIndex >= 0 && filtered[activeIndex]) {
+              // ハイライト中の候補を選択 (台帳紐付け)
+              e.preventDefault();
+              selectCandidate(filtered[activeIndex]);
+            } else {
+              commit();
+            }
+            return;
+          }
+          if (e.key === 'Tab') {
+            if (e.nativeEvent.isComposing) return;
+            e.preventDefault();
+            commit({ advance: e.shiftKey ? -1 : 1 });
+            return;
+          }
+          if (e.key === 'Escape') {
+            doneRef.current = true;
+            onCancel();
+          }
+        }}
+        onBlur={() => commit()}
+      />
+      {/* 候補ドロップダウン */}
+      {filtered.length > 0 ? (
+        <ul
+          className={cn(
+            'absolute left-0 right-0 z-50 rounded-md border border-slate-200 bg-white py-1 shadow-xl',
+            dropUp ? 'bottom-full mb-1' : 'top-full mt-1'
+          )}
+          // マウスで候補を押す際に blur 確定が先に走らないよう mousedown で preventDefault
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          {filtered.map((c, i) => {
+            const displayName = c.member.nickname || c.member.name || '';
+            const realName = c.member.name || '';
+            const label =
+              c.member.nickname && c.member.name && c.member.nickname !== c.member.name
+                ? `${c.member.nickname}（${realName}）`
+                : displayName;
+            return (
+              <li
+                key={c.member.id}
+                className={cn(
+                  'flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm',
+                  i === activeIndex ? 'bg-blue-50 text-blue-900' : 'hover:bg-slate-50 text-slate-800'
+                )}
+                onMouseEnter={() => setActiveIndex(i)}
+                onMouseLeave={() => setActiveIndex(-1)}
+                onClick={() => selectCandidate(c)}
+              >
+                <DivisionDot color={c.color} />
+                <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+                {c.assigned && (
+                  <span className="shrink-0 rounded bg-amber-100 px-1 py-0.5 text-xs font-medium text-amber-700">
+                    移動
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+interface InlineZoneLabelInputProps {
+  left: number;
+  top: number;
+  width: number;
+  initial: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}
+
+/**
+ * エリアラベルのインライン入力 (textarea ベース)。
+ * Enter で改行 / Cmd/Ctrl+Enter または blur で確定 / Esc でキャンセル。IME 対応。
+ */
+function InlineZoneLabelInput({
+  left,
+  top,
+  width,
+  initial,
+  onCommit,
+  onCancel,
+}: InlineZoneLabelInputProps) {
+  const [value, setValue] = useState(initial);
+  const doneRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+    textareaRef.current?.select();
+  }, []);
+
+  const commit = () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onCommit(value);
+  };
+
+  return (
+    <textarea
+      ref={textareaRef}
+      rows={3}
+      className="absolute z-40 -translate-x-1/2 -translate-y-1/2 resize-none rounded-md border-2 border-blue-500 bg-white px-2 py-1.5 text-sm font-bold text-slate-900 shadow-xl outline-none"
       style={{ left, top, width }}
       value={value}
-      placeholder={placeholder}
+      placeholder="エリア名を入力"
       onChange={(e) => setValue(e.target.value)}
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === 'Enter') {
-          if (e.nativeEvent.isComposing) return; // IME 変換確定の Enter は無視
-          commit();
-        } else if (e.key === 'Tab') {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           if (e.nativeEvent.isComposing) return;
-          e.preventDefault();
-          // Tab: 確定して読書順で隣の席のインライン入力を開く
-          commit({ advance: e.shiftKey ? -1 : 1 });
+          commit();
         } else if (e.key === 'Escape') {
           doneRef.current = true;
           onCancel();
         }
+        // plain Enter = newline (default textarea behavior, do nothing)
       }}
       onBlur={() => commit()}
     />
@@ -330,6 +542,22 @@ type Gesture =
       rectLeft: number;
       rectTop: number;
       moved: boolean;
+    }
+  | {
+      type: 'floor-move';
+      startX: number;
+      startY: number;
+      origX: number;
+      origY: number;
+      origScale: number;
+    }
+  | {
+      type: 'floor-scale-handle';
+      startX: number;
+      startY: number;
+      origScale: number;
+      origX: number;
+      origY: number;
     };
 
 type Tool = 'select' | 'place' | 'zone' | 'template';
@@ -352,6 +580,12 @@ interface FloorMapProps {
   editingZoneId?: string | null;
   highlightIds?: Set<string>;
   searchActive?: boolean;
+  /**
+   * フォーカス指定 (検索サジェストから選択した席をビュー中央に移動する命令)。
+   * nonce が変わるたびにフォーカス動作が発火する。
+   */
+  focusSeatId?: string | null;
+  focusNonce?: number;
   onSelectSeat?: (id: string | null) => void;
   onSelectSeats?: (ids: string[]) => void;
   onToggleSeat?: (id: string) => void;
@@ -368,6 +602,10 @@ interface FloorMapProps {
   onFlowPlace?: (x: number, y: number) => void;
   onCommitName?: (seatId: string, value: string, opts?: { advance?: number }) => void;
   onCancelName?: () => void;
+  /** インラインコンボボックスから台帳メンバーを選択したときのコールバック */
+  onSelectMemberForSeat?: (seatId: string, member: Member) => void;
+  /** インラインコンボボックスに表示する台帳メンバー (status='active' のみを想定) */
+  inlineMembers?: Member[];
   onSelectZone?: (id: string | null) => void;
   onAddZone?: (rect: RelRect) => void;
   onMoveZone?: (id: string, x: number, y: number) => void;
@@ -375,6 +613,8 @@ interface FloorMapProps {
   onCommitZoneLabel?: (id: string, value: string) => void;
   onCancelZoneLabel?: () => void;
   onDropFile?: (file: File) => void;
+  adjustingFloor?: boolean;
+  onUpdateFloorTransform?: (transform: { x: number; y: number; scale: number }) => void;
 }
 
 /**
@@ -410,6 +650,8 @@ export default function FloorMap({
   editingZoneId = null,
   highlightIds,
   searchActive,
+  focusSeatId = null,
+  focusNonce = 0,
   onSelectSeat,
   onSelectSeats,
   onToggleSeat,
@@ -426,6 +668,8 @@ export default function FloorMap({
   onFlowPlace,
   onCommitName,
   onCancelName,
+  onSelectMemberForSeat,
+  inlineMembers = [],
   onSelectZone,
   onAddZone,
   onMoveZone,
@@ -433,6 +677,8 @@ export default function FloorMap({
   onCommitZoneLabel,
   onCancelZoneLabel,
   onDropFile,
+  adjustingFloor = false,
+  onUpdateFloorTransform,
 }: FloorMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ scale: 0.4, tx: 0, ty: 0 });
@@ -463,6 +709,46 @@ export default function FloorMap({
   const lastSeatClickRef = useRef<{ seatId: string; x: number; y: number; time: number } | null>(
     null
   );
+
+  // 検索サジェストから選択した席のパルス強調 (1.8秒後に自動解除)
+  const [pulseSeatId, setPulseSeatId] = useState<string | null>(null);
+  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // focusNonce が変わるたびに指定席をビュー中央に移動 + パルス強調
+  useEffect(() => {
+    if (!focusSeatId) return;
+    const seat = seats.find((s) => s.id === focusSeatId);
+    if (!seat) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const cw = el.clientWidth || 1;
+    const ch = el.clientHeight || 1;
+
+    // 目標スケール: 現在のスケールが既に十分ズームしていれば維持、引きすぎていれば寄る
+    const TARGET_SCALE = 1.2;
+    const currentScale = viewRef.current.scale;
+    const newScale = currentScale >= TARGET_SCALE ? currentScale : TARGET_SCALE;
+
+    // 席の中心がビューポート中央に来るよう tx/ty を計算
+    const newTx = cw / 2 - seat.x * W * newScale;
+    const newTy = ch / 2 - seat.y * H * newScale;
+
+    interactedRef.current = true;
+    setView({ scale: newScale, tx: newTx, ty: newTy });
+
+    // パルス強調
+    clearTimeout(pulseTimerRef.current);
+    setPulseSeatId(focusSeatId);
+    pulseTimerRef.current = setTimeout(() => {
+      setPulseSeatId(null);
+    }, 1800);
+
+    return () => {
+      clearTimeout(pulseTimerRef.current);
+    };
+    // focusNonce を依存に入れて「同じ席でも再発火」できるようにする
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSeatId, focusNonce]);
 
   useEffect(() => {
     if (tool !== 'template') setTplCursor(null);
@@ -496,9 +782,9 @@ export default function FloorMap({
     };
   }, [mode]);
 
-  const hasImage = !!location.floorImage;
-  const W = hasImage ? location.imageWidth || BLANK_CANVAS.width : BLANK_CANVAS.width;
-  const H = hasImage ? location.imageHeight || BLANK_CANVAS.height : BLANK_CANVAS.height;
+  const hasImage = !!location.floorImage && !!location.floorTransform;
+  const W = location.canvasWidth;
+  const H = location.canvasHeight;
 
   const seatW = Math.min(
     300,
@@ -667,6 +953,35 @@ export default function FloorMap({
         startMidY: midY,
       };
       return;
+    }
+
+    // 図面調整モード: 図面移動ハンドルとスケールハンドル
+    if (adjustingFloor && location.floorTransform) {
+      const target = e.target as HTMLElement;
+      const floorScaleEl = target.closest?.('[data-floor-scale-handle]') as HTMLElement | null;
+      if (floorScaleEl) {
+        gestureRef.current = {
+          type: 'floor-scale-handle',
+          startX: e.clientX,
+          startY: e.clientY,
+          origScale: location.floorTransform.scale,
+          origX: location.floorTransform.x,
+          origY: location.floorTransform.y,
+        };
+        return;
+      }
+      const floorEl = target.closest?.('[data-floor-image]') as HTMLElement | null;
+      if (floorEl) {
+        gestureRef.current = {
+          type: 'floor-move',
+          startX: e.clientX,
+          startY: e.clientY,
+          origX: location.floorTransform.x,
+          origY: location.floorTransform.y,
+          origScale: location.floorTransform.scale,
+        };
+        return;
+      }
     }
 
     // 中ボタンドラッグ / Space+ドラッグはどこを掴んでもパン (席やハンドルの上からでも)
@@ -888,6 +1203,27 @@ export default function FloorMap({
 
     if (g.type === 'toggle') return;
 
+    if (g.type === 'floor-move') {
+      const v = viewRef.current;
+      const fdx = e.clientX - g.startX;
+      const fdy = e.clientY - g.startY;
+      const nx = g.origX + fdx / v.scale / W;
+      const ny = g.origY + fdy / v.scale / H;
+      onUpdateFloorTransform?.({ x: nx, y: ny, scale: g.origScale });
+      return;
+    }
+
+    if (g.type === 'floor-scale-handle') {
+      const v = viewRef.current;
+      const fdx = e.clientX - g.startX;
+      const fdy = e.clientY - g.startY;
+      // スケールハンドルを右/下に動かすとスケールが大きくなる
+      const delta = (fdx + fdy) / (v.scale * W);
+      const newScale = Math.max(0.01, g.origScale + delta);
+      onUpdateFloorTransform?.({ x: g.origX, y: g.origY, scale: newScale });
+      return;
+    }
+
     if (g.type === 'seat-rotate') {
       // クリックだけ (ドラッグなし) で回転値が書き換わらないよう、4px 動くまでは何もしない
       if (!g.moved && Math.hypot(e.clientX - g.startX, e.clientY - g.startY) <= 4) return;
@@ -1098,7 +1434,9 @@ export default function FloorMap({
       g.type === 'zone-move' ||
       g.type === 'zone-resize' ||
       g.type === 'seat-resize' ||
-      g.type === 'seat-rotate'
+      g.type === 'seat-rotate' ||
+      g.type === 'floor-move' ||
+      g.type === 'floor-scale-handle'
     ) {
       return;
     }
@@ -1196,18 +1534,39 @@ export default function FloorMap({
   const editingSeat = editingSeatId ? seatById.get(editingSeatId) : null;
   const editingMember = editingSeat?.memberId ? memberById.get(editingSeat.memberId) : null;
 
+  // コンボボックス候補: 配置モード・流し込み中は空 (従来の単純入力)
+  // それ以外は status='active' のメンバーを対象に、割り当て済みフラグ付きで生成
+  const inlineCandidates = useMemo<MemberCandidate[]>(() => {
+    if (tool !== 'select' || flowName != null || inlineMembers.length === 0) return [];
+    // 席 → memberId の逆引きマップ (現在編集中の席は除外)
+    const assignedIds = new Set(
+      seats
+        .filter((s) => s.memberId && s.id !== editingSeatId)
+        .map((s) => s.memberId as string)
+    );
+    return inlineMembers
+      .filter((m) => m.status === 'active')
+      .map((m) => ({
+        member: m,
+        assigned: assignedIds.has(m.id),
+        color: departmentColor(colorMap, memberColorKey(m)),
+      }));
+  }, [inlineMembers, seats, editingSeatId, tool, flowName, colorMap]);
+
   const hint =
     mode !== 'edit'
       ? null
-      : flowName != null
-        ? '席または空き場所をクリックすると次の名前が入ります / Esc で終了'
-        : tool === 'place'
-          ? 'クリックで席を配置 (名前入力は Enter 確定・Tab で隣の席へ) / ドラッグで一列に並べて配置 / Esc で配置モード終了'
-          : tool === 'zone'
-            ? '図面上をドラッグして矩形を描くとエリアを追加できます / Esc でエリアツール終了'
-            : tool === 'template'
-              ? `クリックで「${template?.label ?? 'テンプレート'}」を一式配置 (連続配置できます) / Esc で終了`
-              : '席をクリックで選択 (Delete で削除) / ダブルクリックか Enter で名前編集 (Tab で隣の席へ) / ドラッグで移動 / 背景ドラッグで範囲選択 (Shift で追加) / Space+ドラッグ・中ボタンでパン / Cmd/Ctrl+C→V でコピペ / 背景ダブルクリックで席追加';
+      : adjustingFloor
+        ? '図面をドラッグして移動 / 右下ハンドルでスケール調整 / Esc で終了'
+        : flowName != null
+          ? '席または空き場所をクリックすると次の名前が入ります / Esc で終了'
+          : tool === 'place'
+            ? 'クリックで席を配置 (名前入力は Enter 確定・Tab で隣の席へ) / ドラッグで一列に並べて配置 / Esc で配置モード終了'
+            : tool === 'zone'
+              ? '図面上をドラッグして矩形を描くとエリアを追加できます / Esc でエリアツール終了'
+              : tool === 'template'
+                ? `クリックで「${template?.label ?? 'テンプレート'}」を一式配置 (連続配置できます) / Esc で終了`
+                : '席をクリックで選択 (Delete で削除) / ダブルクリックか Enter で名前編集 (Tab で隣の席へ) / ドラッグで移動 / 背景ドラッグで範囲選択 (Shift で追加) / Space+ドラッグ・中ボタンでパン / Cmd/Ctrl+C→V でコピペ / 背景ダブルクリックで席追加';
 
   // 編集モード時のみ図面ファイル (PDF/画像) のドロップを受け付ける。
   // pointer イベントとは独立した DOM イベントなのでジェスチャ処理への影響はない。
@@ -1287,25 +1646,47 @@ export default function FloorMap({
           transformOrigin: '0 0',
         }}
       >
-        {hasImage ? (
-          <img
-            src={location.floorImage!}
-            alt={location.name}
-            width={W}
-            height={H}
-            className="absolute inset-0 h-full w-full pointer-events-none"
-            draggable={false}
-          />
-        ) : (
-          <div
-            className="absolute inset-0 bg-white pointer-events-none"
-            style={{
-              backgroundImage:
-                'linear-gradient(#e2e8f0 1px, transparent 1px), linear-gradient(90deg, #e2e8f0 1px, transparent 1px)',
-              backgroundSize: '50px 50px',
-            }}
-          />
-        )}
+        <div
+          className="absolute inset-0 bg-white pointer-events-none"
+          style={{
+            backgroundImage:
+              'linear-gradient(#e2e8f0 1px, transparent 1px), linear-gradient(90deg, #e2e8f0 1px, transparent 1px)',
+            backgroundSize: '50px 50px',
+          }}
+        />
+        {hasImage && location.floorTransform ? (() => {
+          const ft = location.floorTransform;
+          const imgW = W * ft.scale;
+          const imgH = location.floorImageWidth && location.floorImageHeight
+            ? (imgW * location.floorImageHeight) / location.floorImageWidth
+            : imgW;
+          return (
+            <div
+              data-floor-image
+              className={cn('absolute', adjustingFloor ? 'cursor-move' : 'pointer-events-none')}
+              style={{
+                left: ft.x * W,
+                top: ft.y * H,
+                width: imgW,
+                height: imgH,
+              }}
+            >
+              <img
+                src={location.floorImage!}
+                alt={location.name}
+                className="w-full h-full pointer-events-none"
+                draggable={false}
+              />
+              {adjustingFloor ? (
+                <div
+                  data-floor-scale-handle
+                  className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize bg-blue-600 border-2 border-white rounded-sm shadow"
+                  title="ドラッグでスケール調整"
+                />
+              ) : null}
+            </div>
+          );
+        })() : null}
 
         {/* エリア (ゾーン): 座席より背面に半透明で描画 (z順: 図面 → ゾーン → 座席) */}
         {zones.map((z) => {
@@ -1335,8 +1716,8 @@ export default function FloorMap({
             >
               {z.label ? (
                 <div
-                  className="pointer-events-none absolute left-1.5 top-1 max-w-full truncate pr-1.5 font-bold leading-tight"
-                  style={{ fontSize: zoneLabelFont, color: c.text }}
+                  className="pointer-events-none absolute left-1.5 top-1 max-w-full pr-1.5 font-bold leading-snug whitespace-pre-line overflow-hidden"
+                  style={{ fontSize: Math.round(zoneLabelFont * (z.fontScale ?? 1)), color: c.text }}
                 >
                   {z.label}
                 </div>
@@ -1381,6 +1762,7 @@ export default function FloorMap({
         {seats.map((seat) => {
           const member = seat.memberId ? memberById.get(seat.memberId) : null;
           const highlighted = highlightIds?.has(seat.id);
+          const pulsing = pulseSeatId === seat.id;
           return (
             <SeatNode
               key={seat.id}
@@ -1395,6 +1777,7 @@ export default function FloorMap({
               highlighted={highlighted}
               dimmed={!!searchActive && !highlighted}
               nameMode={nameMode}
+              pulsing={pulsing}
             />
           );
         })}
@@ -1573,22 +1956,24 @@ export default function FloorMap({
           key={editingSeat.id}
           left={view.tx + editingSeat.x * W * view.scale}
           top={view.ty + editingSeat.y * H * view.scale}
-          width={Math.max(140, seatW * view.scale * 1.3)}
+          width={Math.max(160, seatW * view.scale * 1.5)}
           initial={editingMember ? editingMember.nickname || editingMember.name : editingSeat.name ?? ''}
           onCommit={(value, opts) => onCommitName?.(editingSeat.id, value, opts)}
           onCancel={() => onCancelName?.()}
+          candidates={inlineCandidates}
+          onSelectMember={(member) => onSelectMemberForSeat?.(editingSeat.id, member)}
+          containerHeight={containerRef.current?.clientHeight}
         />
       ) : null}
 
       {/* エリアラベルのインライン入力 (画面座標に重ねる) */}
       {mode === 'edit' && editingZone ? (
-        <InlineNameInput
+        <InlineZoneLabelInput
           key={'zone-' + editingZone.id}
           left={view.tx + (editingZone.x + editingZone.w / 2) * W * view.scale}
           top={view.ty + editingZone.y * H * view.scale + 22}
           width={200}
           initial={editingZone.label ?? ''}
-          placeholder="エリア名を入力"
           onCommit={(value) => onCommitZoneLabel?.(editingZone.id, value)}
           onCancel={() => onCancelZoneLabel?.()}
         />

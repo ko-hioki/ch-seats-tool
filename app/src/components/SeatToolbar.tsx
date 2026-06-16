@@ -13,7 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { SEAT_TYPES, type Member, type Seat, type SeatType } from '@/lib/model';
+import { SEAT_TYPES, type Division, type Member, type Seat, type SeatType } from '@/lib/model';
 
 const normRotation = (r: number) => ((r % 360) + 360) % 360;
 
@@ -30,7 +30,9 @@ const fmtSize = (v: number) => String(Math.round(v * 100) / 100);
 interface SeatToolbarProps {
   seats: Seat[];
   member: Member | null | undefined;
+  divisions: Division[];
   onUpdateSeat: (id: string, patch: Partial<Seat>, opts?: { coalesceKey?: string }) => void;
+  onUpdateSeats: (ids: string[], patch: Partial<Seat>) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
   onUnassign: (id: string) => void;
@@ -45,13 +47,15 @@ interface SeatToolbarProps {
 
 /**
  * 編集モードで座席選択時に表示するツールバー。
- * 単一選択: 名前直接入力・席ラベル・種別・回転・複製・削除。
- * 複数選択: 整列・等間隔・回転・島ごと複製・まとめて削除。
+ * 単一選択: 名前直接入力・席ラベル・種別・事業部・回転・複製・削除。
+ * 複数選択: 整列・等間隔・回転・事業部一括設定・島ごと複製・まとめて削除。
  */
 export default function SeatToolbar({
   seats,
   member,
+  divisions,
   onUpdateSeat,
+  onUpdateSeats,
   onDuplicate,
   onDelete,
   onUnassign,
@@ -133,6 +137,28 @@ export default function SeatToolbar({
         >
           <RotateCw /> 90°回転
         </Button>
+        {divisions.length > 0 ? (
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-amber-900">事業部:</span>
+            <Select
+              className="h-8 w-36"
+              value=""
+              onChange={(e) => {
+                if (e.target.value !== '__') {
+                  onUpdateSeats(seats.map((s) => s.id), { division: e.target.value });
+                }
+              }}
+            >
+              <option value="__">一括設定…</option>
+              <option value="">(未設定)</option>
+              {divisions.map((d) => (
+                <option key={d.code} value={d.code}>
+                  {d.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+        ) : null}
         <Button
           variant="outline"
           size="sm"
@@ -207,6 +233,21 @@ export default function SeatToolbar({
           </option>
         ))}
       </Select>
+      {divisions.length > 0 ? (
+        <Select
+          className="h-8 w-36"
+          value={seat.division ?? ''}
+          title="この席の事業部を直接設定 (メンバー紐付けなしでも事業部色で表示)"
+          onChange={(e) => onUpdateSeat(seat.id, { division: e.target.value })}
+        >
+          <option value="">(未設定)</option>
+          {divisions.map((d) => (
+            <option key={d.code} value={d.code}>
+              {d.label}
+            </option>
+          ))}
+        </Select>
+      ) : null}
       <div className="flex items-center gap-1">
         <Button
           variant="outline"

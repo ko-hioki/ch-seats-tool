@@ -59,3 +59,10 @@ body {
 html, body, #root {
   height: 100%;
 }
+
+/* 検索サジェストで選択した席のパルス強調アニメーション */
+@keyframes seat-focus-pulse {
+  0%   { outline-color: #facc15; outline-offset: 2px; opacity: 1; }
+  50%  { outline-color: #f59e0b; outline-offset: 6px; opacity: 0.6; }
+  100% { outline-color: #facc15; outline-offset: 2px; opacity: 1; }
+}

@@ -23,6 +23,87 @@ const PALETTE: DepartmentColor[] = [
   { bg: '#ccfbf1', border: '#14b8a6', text: '#115e59' }, // teal
 ];
 
+/** 名前付きパレット (事業部カラー選択 UI 用)。PALETTE と同一順・同一色値 (2026-06-15 追加) */
+export interface NamedPaletteEntry {
+  key: string;
+  label: string;
+  color: DepartmentColor;
+}
+
+export const NAMED_PALETTE: NamedPaletteEntry[] = [
+  { key: 'blue',   label: 'ブルー',     color: PALETTE[0]  },
+  { key: 'green',  label: 'グリーン',   color: PALETTE[1]  },
+  { key: 'amber',  label: 'アンバー',   color: PALETTE[2]  },
+  { key: 'pink',   label: 'ピンク',     color: PALETTE[3]  },
+  { key: 'purple', label: 'パープル',   color: PALETTE[4]  },
+  { key: 'cyan',   label: 'シアン',     color: PALETTE[5]  },
+  { key: 'orange', label: 'オレンジ',   color: PALETTE[6]  },
+  { key: 'lime',   label: 'ライム',     color: PALETTE[7]  },
+  { key: 'red',    label: 'レッド',     color: PALETTE[8]  },
+  { key: 'indigo', label: 'インディゴ', color: PALETTE[9]  },
+  { key: 'stone',  label: 'グレー',     color: PALETTE[10] },
+  { key: 'teal',   label: 'ティール',   color: PALETTE[11] },
+];
+
+/** パレットキー → DepartmentColor。存在しないキーは undefined */
+export function paletteColorByKey(key: string): DepartmentColor | undefined {
+  return NAMED_PALETTE.find((e) => e.key === key)?.color;
+}
+
+/**
+ * hex 文字列 ('#rrggbb') かどうかを判定する。
+ * 後方互換: パレットキー ('blue' 等) と区別するために使う (2026-06-15 追加)。
+ */
+export function isHexColor(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+/**
+ * hex 文字列 ('#rrggbb') から DepartmentColor を導出する (2026-06-15 追加)。
+ * - border: 指定 hex そのまま
+ * - bg: 指定色を白 (255,255,255) と 15% で合成した淡色
+ * - text: 指定色を HSL で明度を大幅に下げた暗色 (座席の淡い bg に乗っても読める)
+ */
+export function colorFromHex(hex: string): DepartmentColor {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+
+  // bg: 白と 15% ブレンド (白: 85%, 指定色: 15%)
+  const bgR = Math.round(255 * 0.85 + r * 0.15);
+  const bgG = Math.round(255 * 0.85 + g * 0.15);
+  const bgB = Math.round(255 * 0.85 + b * 0.15);
+  const bg = `rgb(${bgR},${bgG},${bgB})`;
+
+  // text: HSL に変換して明度を 25% 程度まで下げた暗色
+  const rn = r / 255, gn = g / 255, bn = b / 255;
+  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+  const delta = max - min;
+  let h = 0;
+  if (delta > 0) {
+    if (max === rn) h = ((gn - bn) / delta) % 6;
+    else if (max === gn) h = (bn - rn) / delta + 2;
+    else h = (rn - gn) / delta + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+  const s = max === 0 ? 0 : Math.round((delta / max) * 100);
+  const text = `hsl(${h},${s}%,25%)`;
+
+  return { bg, border: hex, text };
+}
+
+/**
+ * Division.color の値 (hex '#rrggbb' またはパレットキー 'blue' 等) から DepartmentColor を解決する。
+ * 未指定 (undefined/空) の場合は undefined を返す (呼び出し側で自動割り当てにフォールバック)。
+ * (2026-06-15 追加)
+ */
+export function resolveColorValue(value: string | undefined): DepartmentColor | undefined {
+  if (!value) return undefined;
+  if (isHexColor(value)) return colorFromHex(value);
+  return paletteColorByKey(value);
+}
+
 const NO_DEPT: DepartmentColor = { bg: '#f1f5f9', border: '#94a3b8', text: '#334155' };
 
 function hashString(str: string): number {
@@ -34,13 +115,28 @@ function hashString(str: string): number {
 }
 
 /**
- * 全部署一覧から色マップを作る (一覧順で安定割り当て)
+ * 全部署一覧から色マップを作る (一覧順で安定割り当て)。
+ * overrides: key → パレットキー または hex 文字列 '#rrggbb' のマップ。
+ * 指定されたキーはそのパレット色 (またはhex導出色) を使う。
+ * overrides を持たないキーは PALETTE の順序に従った自動割り当て (既存挙動と同一)。
+ * (2026-06-15: hex 文字列対応を追加)
  */
-export function buildDepartmentColorMap(departments: string[]): Map<string, DepartmentColor> {
+export function buildDepartmentColorMap(
+  departments: string[],
+  overrides?: Map<string, string>
+): Map<string, DepartmentColor> {
   const uniq = [...new Set(departments.filter(Boolean))].sort();
   const map = new Map<string, DepartmentColor>();
-  uniq.forEach((dept, i) => {
-    map.set(dept, i < PALETTE.length ? PALETTE[i] : PALETTE[hashString(dept) % PALETTE.length]);
+  let autoIndex = 0;
+  uniq.forEach((dept) => {
+    const overrideKey = overrides?.get(dept);
+    if (overrideKey) {
+      const c = resolveColorValue(overrideKey);
+      map.set(dept, c ?? PALETTE[hashString(dept) % PALETTE.length]);
+    } else {
+      const i = autoIndex++;
+      map.set(dept, i < PALETTE.length ? PALETTE[i] : PALETTE[hashString(dept) % PALETTE.length]);
+    }
   });
   return map;
 }

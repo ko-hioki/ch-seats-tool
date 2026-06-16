@@ -7,6 +7,7 @@ import {
   Database,
   Image as ImageIcon,
   ImageOff,
+  Move,
   Plus,
   Minus,
   Search,
@@ -118,6 +119,12 @@ interface SeatClipboard {
   srcH: number;
 }
 
+// ゾーン用クリップボード
+interface ZoneClipboard {
+  type: 'zone';
+  zone: Zone;
+}
+
 interface PopoverState {
   seatId: string;
   x: number;
@@ -185,6 +192,14 @@ export default function App() {
   };
   const [locationId, setLocationId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  // 検索サジェストドロップダウンの表示状態
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  // 検索サジェストのキーボードハイライト index
+  const [suggestIndex, setSuggestIndex] = useState(-1);
+  // 検索サジェストで選択した席へのフォーカス命令 (nonce が変わるたびに FloorMap が再発火)
+  const [focusSeat, setFocusSeat] = useState<{ seatId: string; locationId: string; nonce: number } | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const suggestRef = useRef<HTMLDivElement>(null);
   const [selectedSeatIds, setSelectedSeatIds] = useState<Set<string>>(() => new Set());
   const [tool, setTool] = useState<Tool>('select'); // 'select' | 'place' (クリック配置) | 'zone' (エリア描画) | 'template' (机テンプレート配置)
   const [template, setTemplate] = useState<SeatTemplate | null>(null); // tool='template' 中に配置する机テンプレート (SEAT_TEMPLATES の要素)
@@ -203,6 +218,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dataIOOpen, setDataIOOpen] = useState(false);
   const [locManagerOpen, setLocManagerOpen] = useState(false);
+  const [adjustingFloor, setAdjustingFloor] = useState(false);
   const [dragGhost, setDragGhost] = useState<DragGhost | null>(null); // {member, x, y}
   const [toast, setToast] = useState<ToastState | null>(null);
 
@@ -210,8 +226,8 @@ export default function App() {
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const templateMenuRef = useRef<HTMLDivElement>(null);
 
-  // コピペ用のアプリ内クリップボード ({seats, cx, cy, srcW, srcH})。OS クリップボードは使わない
-  const clipboardRef = useRef<SeatClipboard | null>(null);
+  // コピペ用のアプリ内クリップボード ({seats, cx, cy, srcW, srcH} または {type:'zone', zone})。OS クリップボードは使わない
+  const clipboardRef = useRef<SeatClipboard | ZoneClipboard | null>(null);
   // 連続ペーストのオフセット段数 (コピーでリセット)
   const pasteCountRef = useRef(0);
   // FloorMap 上のマウス位置 (相対座標)。キャンバス外は null。貼り付けの基準位置に使う
@@ -363,11 +379,18 @@ export default function App() {
   );
   // 事業部リスト (セッションデータの設定。設定ダイアログで編集可能)
   const divisions = data?.settings?.divisions ?? [];
-  // 色分けキー: 事業部 (設定時) → 部署 (フォールバック)
-  const colorMap = useMemo(
-    () => buildDepartmentColorMap((data?.members ?? []).map((m) => memberColorKey(m))),
-    [data]
-  );
+  // 色分けキー: 事業部 (設定時) → 部署 (フォールバック)。
+  // settings.divisions の color フィールドでパレットキーが指定された事業部は上書き色を使う。
+  const colorMap = useMemo(() => {
+    const overrides = new Map<string, string>();
+    for (const div of data?.settings?.divisions ?? []) {
+      if (div.color) overrides.set(div.code, div.color);
+    }
+    return buildDepartmentColorMap(
+      (data?.members ?? []).map((m) => memberColorKey(m)),
+      overrides.size > 0 ? overrides : undefined
+    );
+  }, [data]);
   const locationSeats = useMemo(
     () => (data?.seats ?? []).filter((s) => s.locationId === currentLocationId),
     [data, currentLocationId]
@@ -406,13 +429,125 @@ export default function App() {
         ) {
           ids.add(s.id);
         }
-      } else if ((s.name ?? '').toLowerCase().includes(q)) {
-        // 直接入力の名前も検索対象
-        ids.add(s.id);
+      } else {
+        // 直接入力の名前・事業部直接設定も検索対象
+        if ((s.name ?? '').toLowerCase().includes(q)) {
+          ids.add(s.id);
+        } else if (s.division) {
+          const divName = divisionLabel(divisions, s.division).toLowerCase();
+          if (divName.includes(q) || s.division.toLowerCase().includes(q)) {
+            ids.add(s.id);
+          }
+        }
       }
     }
     return ids;
   }, [search, locationSeats, memberById, divisions]);
+
+  // ---- 検索サジェスト候補 (全拠点の席を対象) ----
+  // 候補 = 検索語にマッチする席。同名が複数席あれば席ごとに個別エントリとして列挙。
+  interface SuggestCandidate {
+    seatId: string;
+    locationId: string;
+    locationName: string;
+    /** 表示メイン名 (台帳メンバーのあだ名/本名 or 直書き名) */
+    displayName: string;
+    /** サブ表示 (拠点名 + 席ラベル) */
+    sub: string;
+    /** 事業部色 (ドット表示用) */
+    divisionColorKey: string;
+  }
+
+  const suggestCandidates = useMemo<SuggestCandidate[]>(() => {
+    const q = search.trim().toLowerCase();
+    if (!q || !data) return [];
+    const locationById = new Map(data.locations.map((l) => [l.id, l]));
+    const results: SuggestCandidate[] = [];
+    for (const s of data.seats) {
+      const loc = locationById.get(s.locationId);
+      if (!loc) continue;
+      const m = s.memberId ? memberById.get(s.memberId) : null;
+      let match = false;
+      let displayName = '';
+      let divisionColorKey = '';
+      if (m) {
+        displayName = m.nickname || m.name || '';
+        divisionColorKey = m.division || m.department || '';
+        if (
+          (m.name ?? '').toLowerCase().includes(q) ||
+          (m.nickname ?? '').toLowerCase().includes(q) ||
+          divisionLabel(divisions, m.division).toLowerCase().includes(q) ||
+          (m.division ?? '').toLowerCase().includes(q) ||
+          (m.department ?? '').toLowerCase().includes(q)
+        ) {
+          match = true;
+        }
+      } else {
+        displayName = s.name ?? '';
+        divisionColorKey = s.division || '';
+        if (displayName.toLowerCase().includes(q)) {
+          match = true;
+        } else if (s.division) {
+          const dname = divisionLabel(divisions, s.division).toLowerCase();
+          if (dname.includes(q) || s.division.toLowerCase().includes(q)) match = true;
+        }
+      }
+      // 席ラベルでもマッチ
+      if (!match && s.label && s.label.toLowerCase().includes(q)) match = true;
+      if (!match) continue;
+      const subParts: string[] = [loc.name];
+      if (s.label) subParts.push(s.label);
+      results.push({
+        seatId: s.id,
+        locationId: s.locationId,
+        locationName: loc.name,
+        displayName: displayName || '(空席)',
+        sub: subParts.join(' — '),
+        divisionColorKey,
+      });
+      if (results.length >= 10) break;
+    }
+    return results;
+  }, [search, data, memberById, divisions]);
+
+  // サジェスト候補が変わったらキーボードハイライトをリセット
+  useEffect(() => {
+    setSuggestIndex(-1);
+  }, [suggestCandidates]);
+
+  // サジェスト外クリックで閉じる
+  useEffect(() => {
+    if (!suggestOpen) return;
+    const h = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (
+        !searchInputRef.current?.contains(target) &&
+        !suggestRef.current?.contains(target)
+      ) {
+        setSuggestOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', h);
+    return () => window.removeEventListener('pointerdown', h);
+  }, [suggestOpen]);
+
+  // サジェスト候補を選択したときの処理
+  const selectSuggestCandidate = useCallback(
+    (candidate: SuggestCandidate) => {
+      setSuggestOpen(false);
+      // 別拠点なら切り替え (切り替え後に useEffect で focusSeat が発火する)
+      if (candidate.locationId !== currentLocationId) {
+        setLocationId(candidate.locationId);
+        // 拠点切替後の次フレームでフォーカス命令を出す (setTimeout で 1 tick 遅らせる)
+        setTimeout(() => {
+          setFocusSeat({ seatId: candidate.seatId, locationId: candidate.locationId, nonce: Date.now() });
+        }, 0);
+      } else {
+        setFocusSeat({ seatId: candidate.seatId, locationId: candidate.locationId, nonce: Date.now() });
+      }
+    },
+    [currentLocationId]
+  );
 
   // ---- データ変更 (ローカル。保存ボタンでサーバーへ) ----
   // opts.coalesceKey: 直前の push と同じキーなら履歴を積まない (ドラッグ移動の集約用)
@@ -504,54 +639,88 @@ export default function App() {
       };
     });
 
-  // 図面の設定/差し替え。差し替えで縦横比が 1% 以上変わる場合は
-  // 既存座席を contain フィットで再マッピングして大きなズレを防ぐ。
-  // 戻り値: 座標補正を行ったかどうか
+  // 図面の設定/差し替え。
+  // img=null: 図面なしの無地キャンバスに戻す (座席は保持)
+  // img あり: floorImage/floorImageWidth/floorImageHeight を更新し、floorTransform を {x:0,y:0,scale:1} に設定
+  //           席ゼロ or デフォルトキャンバスの場合のみ canvasWidth/Height も更新
   const setFloorImage = (locId: string, img: CompressedFloorImage | null) => {
     const d0 = dataRef.current;
     const loc = d0?.locations.find((l) => l.id === locId);
-    const oldW = loc?.imageWidth;
-    const oldH = loc?.imageHeight;
-    let remap: ((seat: Seat) => Seat) | null = null;
-    if (
-      img &&
-      oldW &&
-      oldH &&
-      d0!.seats.some((s) => s.locationId === locId) &&
-      Math.abs((img.width / img.height) / (oldW / oldH) - 1) > 0.01
-    ) {
-      const sc = Math.min(img.width / oldW, img.height / oldH);
-      const ox = (img.width - oldW * sc) / 2;
-      const oy = (img.height - oldH * sc) / 2;
-      remap = (seat) => ({
-        ...seat,
-        x: (ox + seat.x * oldW * sc) / img.width,
-        y: (oy + seat.y * oldH * sc) / img.height,
-      });
+    if (!img) {
+      mutate((d) => ({
+        ...d,
+        locations: d.locations.map((l) =>
+          l.id === locId
+            ? {
+                ...l,
+                floorImage: null,
+                floorImageWidth: null,
+                floorImageHeight: null,
+                floorTransform: null,
+              }
+            : l
+        ),
+      }));
+      showToast('図面を削除しました。「保存」で確定してください。');
+      return false;
     }
+    const hasSeats = (d0?.seats ?? []).some((s) => s.locationId === locId);
+    const isDefaultCanvas =
+      !loc ||
+      (loc.canvasWidth === BLANK_CANVAS.width && loc.canvasHeight === BLANK_CANVAS.height);
     mutate((d) => ({
       ...d,
-      seats: remap ? d.seats.map((s) => (s.locationId === locId ? remap(s) : s)) : d.seats,
+      locations: d.locations.map((l) => {
+        if (l.id !== locId) return l;
+        const newCanvasWidth =
+          (!hasSeats || isDefaultCanvas) ? img.width : l.canvasWidth;
+        const newCanvasHeight =
+          (!hasSeats || isDefaultCanvas) ? img.height : l.canvasHeight;
+        return {
+          ...l,
+          canvasWidth: newCanvasWidth,
+          canvasHeight: newCanvasHeight,
+          floorImage: img.dataUrl,
+          floorImageWidth: img.width,
+          floorImageHeight: img.height,
+          floorTransform: { x: 0, y: 0, scale: 1 },
+        };
+      }),
+    }));
+    const kb = Math.round((img.dataUrl.length * 0.75) / 1024);
+    showToast(
+      `図面を設定しました (${img.width}x${img.height}, 約${kb}KB)。「保存」で確定してください。`
+    );
+    return false;
+  };
+
+  // 図面のトランスフォームを更新 (adjustingFloor モードのドラッグ/スケール調整)
+  const updateFloorTransform = (transform: { x: number; y: number; scale: number }) => {
+    if (!currentLocationId) return;
+    mutate(
+      (d) => ({
+        ...d,
+        locations: d.locations.map((l) =>
+          l.id === currentLocationId ? { ...l, floorTransform: transform } : l
+        ),
+      }),
+      { coalesceKey: 'floorTransform:' + currentLocationId }
+    );
+  };
+
+  // キャンバスサイズを更新 (LocationManagerDialog から)
+  const updateCanvasSize = (locId: string, width: number, height: number) => {
+    mutate((d) => ({
+      ...d,
       locations: d.locations.map((l) =>
-        l.id === locId
-          ? {
-              ...l,
-              floorImage: img?.dataUrl ?? null,
-              imageWidth: img?.width ?? null,
-              imageHeight: img?.height ?? null,
-            }
-          : l
+        l.id === locId ? { ...l, canvasWidth: width, canvasHeight: height } : l
       ),
     }));
-    if (remap) {
-      showToast('縦横比が変わったため座席位置を補正しました。ズレがあれば調整してください');
-    }
-    return !!remap;
   };
 
   // 現在拠点の席1個分のサイズ (画像ピクセル換算。FloorMap の seatW と同じ基準)
   const seatUnit = (loc: Location | null | undefined) => {
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
     return Math.min(150, Math.max(56, W / 16)) * (loc?.seatScale ?? 1);
   };
 
@@ -589,7 +758,7 @@ export default function App() {
   // Tab ジャンプ用: 読書順 (同じ行で次の x → 次の行の左端) で隣の席を解決する
   const findNextSeat = (seat: Seat, dir: number): Seat | null => {
     const loc = currentLocation;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const rowTol = (seatUnit(loc) * 0.62) / H; // 席1個分の高さを同一行の許容差とする
     const others = (dataRef.current?.seats ?? []).filter(
       (s) => s.locationId === seat.locationId && s.id !== seat.id
@@ -643,6 +812,20 @@ export default function App() {
   };
 
   const cancelNameEdit = () => setNameEditSeatId(null);
+
+  // インラインコンボボックスから台帳メンバーを選択したときのハンドラ。
+  // 既存の dropMemberOnSeat (移動・スワップ込み) と同じ挙動にする。
+  // seat.name は '' に (台帳表示が優先されるため)。
+  const handleSelectMemberForSeat = (seatId: string, member: Member) => {
+    setNameEditSeatId(null);
+    selectSeat(seatId);
+    dropMemberOnSeat(member.id, seatId);
+    // seat.name もクリアしておく (紐付け後は台帳名が表示されるため)
+    mutate((d) => ({
+      ...d,
+      seats: d.seats.map((s) => (s.id === seatId ? { ...s, name: '' } : s)),
+    }));
+  };
 
   // ---- 名前リスト流し込みモード ----
   // queue のエントリは {name, department?}。registerToLedger が真なら
@@ -725,7 +908,7 @@ export default function App() {
   // 1回の mutate + history 1エントリ ({type:'bulk'}) なので「1つ戻す」で一括で戻せる。
   const flowFillVacantSeats = () => {
     if (!flow || flow.queue.length === 0 || !currentLocation) return;
-    const H = currentLocation.imageHeight ?? BLANK_CANVAS.height;
+    const H = currentLocation.canvasHeight ?? BLANK_CANVAS.height;
     const rowTol = seatUnit(currentLocation) / H; // 席1個分の高さを同一行の許容差とする
     const vacant = locationSeats.filter((s) => (s.name ?? '') === '' && !s.memberId);
     if (vacant.length === 0) return;
@@ -880,8 +1063,8 @@ export default function App() {
     const src = d0?.seats.find((s) => s.id === id);
     if (!src) return;
     const loc = d0!.locations.find((l) => l.id === src.locationId);
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const vertical = (((src.rotation ?? 0) % 180) + 180) % 180 === 90;
     // 席ごとのサイズ (w/h) を考慮して、隣接位置が重ならないようにオフセット
     const off =
@@ -907,7 +1090,7 @@ export default function App() {
     const targets = d0?.seats.filter((s) => set.has(s.id)) ?? [];
     if (!targets.length) return;
     const loc = d0!.locations.find((l) => l.id === targets[0].locationId);
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
     const minX = Math.min(...targets.map((s) => s.x));
     const maxX = Math.max(...targets.map((s) => s.x));
     // 横長席 (w > 1) があっても重ならないよう、最大の席幅でオフセット
@@ -948,8 +1131,8 @@ export default function App() {
       seats: targets.map((s) => ({ ...s })),
       cx: (Math.min(...targets.map((s) => s.x)) + Math.max(...targets.map((s) => s.x))) / 2,
       cy: (Math.min(...targets.map((s) => s.y)) + Math.max(...targets.map((s) => s.y))) / 2,
-      srcW: loc?.imageWidth ?? BLANK_CANVAS.width,
-      srcH: loc?.imageHeight ?? BLANK_CANVAS.height,
+      srcW: loc?.canvasWidth ?? BLANK_CANVAS.width,
+      srcH: loc?.canvasHeight ?? BLANK_CANVAS.height,
     };
     pasteCountRef.current = 0;
     showToast(`${targets.length} 席をコピーしました (Cmd/Ctrl+V で貼り付け)`);
@@ -960,10 +1143,10 @@ export default function App() {
   // 名前・台帳紐付けは引き継がない (レイアウト複製が目的)。1 mutate = Undo 1回。
   const pasteSeats = () => {
     const clip = clipboardRef.current;
-    if (!clip?.seats?.length || !currentLocationId) return;
+    if (!clip || !('seats' in clip) || !clip.seats?.length || !currentLocationId) return;
     const loc = dataRef.current!.locations.find((l) => l.id === currentLocationId);
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const unit = seatUnit(loc);
     const n = pasteCountRef.current;
     const stepX = (unit * 1.1) / W;
@@ -995,14 +1178,56 @@ export default function App() {
     showToast(`${copies.length} 席を貼り付けました`);
   };
 
+  // ---- ゾーンのコピー & ペースト ----
+  const copyZone = (id: string) => {
+    const z = dataRef.current?.zones?.find((z) => z.id === id);
+    if (!z) return;
+    clipboardRef.current = { type: 'zone', zone: { ...z } };
+    pasteCountRef.current = 0;
+    showToast('エリアをコピーしました (Cmd/Ctrl+V で貼り付け)');
+  };
+
+  const pasteZone = () => {
+    const clip = clipboardRef.current;
+    if (!clip || !('zone' in clip) || !currentLocationId) return;
+    const loc = dataRef.current!.locations.find((l) => l.id === currentLocationId);
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
+    const unit_x = 40 / W;
+    const unit_y = 40 / H;
+    const n = pasteCountRef.current;
+    const src = clip.zone;
+    const cur = cursorPosRef.current;
+    let cx: number;
+    let cy: number;
+    if (cur && cur.x >= 0 && cur.x <= 1 && cur.y >= 0 && cur.y <= 1) {
+      cx = cur.x - src.w / 2 + n * unit_x;
+      cy = cur.y - src.h / 2 + n * unit_y;
+    } else {
+      cx = src.x + (n + 1) * unit_x;
+      cy = src.y + (n + 1) * unit_y;
+    }
+    const newZone: Zone = {
+      ...src,
+      id: uid(),
+      locationId: currentLocationId,
+      x: Math.min(1 - src.w, Math.max(0, cx)),
+      y: Math.min(1 - src.h, Math.max(0, cy)),
+    };
+    mutate((d) => ({ ...d, zones: [...(d.zones ?? []), newZone] }));
+    selectZone(newZone.id);
+    pasteCountRef.current = n + 1;
+    showToast('エリアを貼り付けました');
+  };
+
   // ---- 机テンプレート ----
   // クリック位置を中心にテンプレートの席一式を配置 (1 mutate = Undo 1回)。
   // dx は席ユニット幅、dy は席ユニット高さ (幅×0.62) 単位 (SEAT_TEMPLATES 参照)
   const addTemplateAt = (x: number, y: number) => {
     if (!template || !currentLocationId) return;
     const loc = dataRef.current!.locations.find((l) => l.id === currentLocationId);
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const unit = seatUnit(loc);
     const unitH = unit * 0.62;
     const newSeats = template.seats.map((t) =>
@@ -1101,8 +1326,8 @@ export default function App() {
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 3) return;
     const loc = currentLocation;
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const unit = seatUnit(loc);
     const D = axis === 'x' ? W : H;
 
@@ -1173,8 +1398,8 @@ export default function App() {
     const targets = dataRef.current?.seats.filter((s) => set.has(s.id)) ?? [];
     if (targets.length < 2) return;
     const loc = currentLocation;
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     const xs = targets.map((s) => s.x * W);
     const ys = targets.map((s) => s.y * H);
     const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
@@ -1202,8 +1427,8 @@ export default function App() {
     const set = ids instanceof Set ? ids : new Set(ids);
     if (set.size === 0) return;
     const loc = currentLocation;
-    const W = loc?.imageWidth ?? BLANK_CANVAS.width;
-    const H = loc?.imageHeight ?? BLANK_CANVAS.height;
+    const W = loc?.canvasWidth ?? BLANK_CANVAS.width;
+    const H = loc?.canvasHeight ?? BLANK_CANVAS.height;
     mutate((d) => {
       const targets = d.seats.filter((s) => set.has(s.id));
       let posMap: Map<string, { x: number; y: number }> | null = null;
@@ -1295,6 +1520,9 @@ export default function App() {
         if (mode === 'edit' && selectedSeatIds.size > 0) {
           e.preventDefault();
           copySeats(selectedSeatIds);
+        } else if (mode === 'edit' && selectedZoneId) {
+          e.preventDefault();
+          copyZone(selectedZoneId);
         }
         return;
       }
@@ -1302,7 +1530,11 @@ export default function App() {
         if (inField || nameEditSeatId != null) return;
         if (mode === 'edit' && clipboardRef.current) {
           e.preventDefault();
-          pasteSeats();
+          if ('zone' in clipboardRef.current) {
+            pasteZone();
+          } else {
+            pasteSeats();
+          }
         }
         return;
       }
@@ -1338,6 +1570,8 @@ export default function App() {
       if (flow) {
         setFlow(null);
         showToast('流し込みを終了しました');
+      } else if (adjustingFloor) {
+        setAdjustingFloor(false);
       } else if (tool === 'place' || tool === 'zone' || tool === 'template') {
         setTool('select');
         setTemplate(null);
@@ -1348,7 +1582,7 @@ export default function App() {
     // undoFlow / deleteSeats / rotateSeats / deleteZone / copySeats / pasteSeats は
     // flow / mode / selectedSeatIds / currentLocationId 等の変化で再購読される
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flow, tool, mode, selectedSeatIds, selectedZoneId, nameEditSeatId, currentLocationId, showToast, undo, redo]);
+  }, [flow, tool, mode, adjustingFloor, selectedSeatIds, selectedZoneId, nameEditSeatId, currentLocationId, showToast, undo, redo]);
 
   // 台帳メンバーとの紐付け解除。直接入力名が無ければ表示名を引き継ぐ (席のラベルが消えないように)
   const unassignSeat = (seatId: string) =>
@@ -1583,28 +1817,20 @@ export default function App() {
     if (!file || !currentLocationId) return;
     try {
       let source: Blob = file;
-      let pdfNote = '';
       if (isPdfFile(file)) {
         // PDF はクライアント側で 1 ページ目を画像化してから圧縮に流す
         showToast('PDF を画像化しています…');
-        const { blob, numPages } = await renderPdfFirstPage(file);
+        const { blob } = await renderPdfFirstPage(file);
         source = blob;
-        if (numPages > 1) pdfNote = ` (PDF 全${numPages}ページ中 1 ページ目を使用)`;
       }
       const img = await compressFloorImage(source);
       const hadSeats = (dataRef.current?.seats ?? []).some(
         (s) => s.locationId === currentLocationId
       );
-      const corrected = setFloorImage(currentLocationId, img);
+      setFloorImage(currentLocationId, img);
       if (!hadSeats) {
         // 席ゼロの拠点に図面を設定したら、そのまま連続クリック配置を開始する
         setTool('place');
-        showToast('図面を設定しました。そのままクリックで席を置けます (Esc で終了)');
-      } else if (!corrected) {
-        const kb = Math.round((img.dataUrl.length * 0.75) / 1024);
-        showToast(
-          `図面を設定しました (${img.width}x${img.height}, 約${kb}KB)${pdfNote}。「保存」で確定してください。`
-        );
       }
     } catch (err) {
       showToast((err as Error).message, 'error');
@@ -1660,13 +1886,90 @@ export default function App() {
           ) : null}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
             <div className="relative">
-              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none z-10" />
+              {search && (
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 z-10 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  tabIndex={-1}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    setSearch('');
+                    setSuggestOpen(false);
+                    searchInputRef.current?.focus();
+                  }}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
               <Input
+                ref={searchInputRef}
                 className="h-8 w-44 pl-7 sm:w-56"
                 placeholder="名前・事業部・部署で検索"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setSuggestOpen(true);
+                }}
+                onFocus={() => {
+                  if (search.trim()) setSuggestOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (!suggestOpen || suggestCandidates.length === 0) return;
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setSuggestIndex((i) => Math.min(i + 1, suggestCandidates.length - 1));
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setSuggestIndex((i) => Math.max(i - 1, -1));
+                  } else if (e.key === 'Enter') {
+                    if (e.nativeEvent.isComposing) return;
+                    if (suggestIndex >= 0 && suggestCandidates[suggestIndex]) {
+                      e.preventDefault();
+                      selectSuggestCandidate(suggestCandidates[suggestIndex]);
+                    } else {
+                      setSuggestOpen(false);
+                    }
+                  } else if (e.key === 'Escape') {
+                    setSuggestOpen(false);
+                  }
+                }}
               />
+              {/* 検索サジェストドロップダウン */}
+              {suggestOpen && suggestCandidates.length > 0 ? (
+                <div
+                  ref={suggestRef}
+                  className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-slate-200 bg-white py-1 shadow-xl"
+                  onPointerDown={(e) => e.preventDefault()}
+                >
+                  {suggestCandidates.map((c, i) => {
+                    const dotColor = c.divisionColorKey
+                      ? (() => {
+                          const dc = colorMap.get(c.divisionColorKey);
+                          return dc ? dc.border : '#94a3b8';
+                        })()
+                      : '#94a3b8';
+                    return (
+                      <div
+                        key={`${c.seatId}`}
+                        className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm ${
+                          i === suggestIndex ? 'bg-blue-50 text-blue-900' : 'text-slate-800 hover:bg-slate-50'
+                        }`}
+                        onMouseEnter={() => setSuggestIndex(i)}
+                        onMouseLeave={() => setSuggestIndex(-1)}
+                        onClick={() => selectSuggestCandidate(c)}
+                      >
+                        <span
+                          className="inline-block h-2 w-2 shrink-0 rounded-full"
+                          style={{ background: dotColor }}
+                        />
+                        <span className="min-w-0 flex-1 truncate font-medium">{c.displayName}</span>
+                        <span className="shrink-0 text-xs text-slate-400">{c.sub}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
             {mode === 'view' ? (
               <>
@@ -1833,17 +2136,28 @@ export default function App() {
                 <ImageIcon /> {currentLocation.floorImage ? '図面を差し替え' : '図面を設定 (画像/PDF)'}
               </Button>
               {currentLocation.floorImage ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    if (confirm('図面画像を削除して無地キャンバスに戻しますか？(座席は残ります)')) {
-                      setFloorImage(currentLocationId!, null);
-                    }
-                  }}
-                >
-                  <ImageOff /> 図面を削除
-                </Button>
+                <>
+                  <Button
+                    variant={adjustingFloor ? 'default' : 'outline'}
+                    size="sm"
+                    title="図面の位置・スケールを調整します (Esc で終了)"
+                    onClick={() => setAdjustingFloor((v) => !v)}
+                  >
+                    <Move /> {adjustingFloor ? '図面調整中 (Esc で終了)' : '図面を調整'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm('図面画像を削除して無地キャンバスに戻しますか？(座席は残ります)')) {
+                        setFloorImage(currentLocationId!, null);
+                        setAdjustingFloor(false);
+                      }
+                    }}
+                  >
+                    <ImageOff /> 図面を削除
+                  </Button>
+                </>
               ) : null}
               <div
                 className="flex h-8 items-center gap-0.5 rounded-md border bg-background px-1.5"
@@ -1902,7 +2216,14 @@ export default function App() {
         <SeatToolbar
           seats={selectedSeats}
           member={selectedSeat?.memberId ? memberById.get(selectedSeat.memberId) : null}
+          divisions={divisions}
           onUpdateSeat={updateSeat}
+          onUpdateSeats={(ids, patch) =>
+            mutate((d) => ({
+              ...d,
+              seats: d.seats.map((s) => (ids.includes(s.id) ? { ...s, ...patch } : s)),
+            }))
+          }
           onDuplicate={duplicateSeat}
           onDelete={deleteSeat}
           onUnassign={unassignSeat}
@@ -2041,6 +2362,8 @@ export default function App() {
               editingZoneId={mode === 'edit' ? zoneLabelEditId : null}
               highlightIds={highlightIds}
               searchActive={searchActive}
+              focusSeatId={focusSeat?.locationId === currentLocationId ? focusSeat.seatId : null}
+              focusNonce={focusSeat?.locationId === currentLocationId ? focusSeat.nonce : 0}
               onSelectSeat={selectSeat}
               onSelectSeats={selectSeats}
               onToggleSeat={toggleSeat}
@@ -2059,6 +2382,8 @@ export default function App() {
               onFlowPlace={flowPlaceAt}
               onCommitName={commitSeatName}
               onCancelName={cancelNameEdit}
+              onSelectMemberForSeat={handleSelectMemberForSeat}
+              inlineMembers={data?.members ?? []}
               onSelectZone={selectZone}
               onAddZone={addZoneAt}
               onMoveZone={moveZone}
@@ -2066,6 +2391,8 @@ export default function App() {
               onCommitZoneLabel={commitZoneLabel}
               onCancelZoneLabel={() => setZoneLabelEditId(null)}
               onDropFile={mode === 'edit' ? processImageFile : undefined}
+              adjustingFloor={adjustingFloor}
+              onUpdateFloorTransform={updateFloorTransform}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center p-6">
@@ -2194,6 +2521,7 @@ export default function App() {
         onRename={renameLocation}
         onDelete={deleteLocation}
         onMove={moveLocation}
+        onUpdateCanvas={updateCanvasSize}
       />
       <NameFlowDialog
         open={flowDialogOpen}

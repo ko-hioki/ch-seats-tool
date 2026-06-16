@@ -23,6 +23,13 @@ export interface AppData {
 export interface Division {
   code: string;
   label: string;
+  /**
+   * 色指定 (2026-06-15 追加・拡張)。
+   * - hex 文字列 ('#rrggbb'): 任意色。bg/border/text は colorFromHex() で導出
+   * - パレットキー ('blue', 'green' 等): 従来の NAMED_PALETTE から解決 (後方互換)
+   * - undefined: 自動割り当て (PALETTE の順序に従う)
+   */
+  color?: string;
 }
 
 /**
@@ -37,11 +44,22 @@ export interface Location {
   id: string;
   name: string;
   order: number;
+  /** キャンバス(背景レイヤー)のサイズ。座席相対座標(0-1)の基準 */
+  canvasWidth: number;
+  canvasHeight: number;
   /** フロア図面 (dataURL)。無地キャンバスの場合は null */
   floorImage: string | null;
-  imageWidth: number | null;
-  imageHeight: number | null;
-  /** 席表示倍率 0.4〜2.0 (2026-06-11 追加。欠損時は 1 として正規化) */
+  /** 図面の元ピクセル幅(アスペクト比保持用) */
+  floorImageWidth: number | null;
+  /** 図面の元ピクセル高さ(アスペクト比保持用) */
+  floorImageHeight: number | null;
+  /**
+   * キャンバス上の図面配置。null=図面なし
+   * x,y: 図面左上のキャンバス相対座標(0-1基準)
+   * scale: 図面を canvasWidth に対してどの倍率で表示するか (1=canvasWidth に幅が一致)
+   */
+  floorTransform: { x: number; y: number; scale: number } | null;
+  /** 席表示倍率 0.4〜2.0 */
   seatScale: number;
 }
 
@@ -87,6 +105,8 @@ export interface Seat {
   /** 台帳メンバーとの紐付け (任意)。紐付け時は表示名・色分け・詳細が台帳から解決される */
   memberId: string | null;
   type: SeatType;
+  /** 事業部コードの直接設定 (メンバー紐付けなしでも事業部色で表示。'' = 未設定。2026-06-12 追加) */
+  division: string;
 }
 
 export interface Zone {
@@ -101,6 +121,8 @@ export interface Zone {
   color: string;
   /** エリア名 (例: "OPエリア") */
   label: string;
+  /** ラベルのフォントスケール (1 = 基準サイズ。0.5〜3.0。2026-06-12 追加) */
+  fontScale: number;
 }
 
 /** 机テンプレートの席 1 つ分の定義 (dx/dy は席ユニット単位のオフセット) */
@@ -143,9 +165,12 @@ export function createLocation(name: string, order: number): Location {
     id: uid(),
     name,
     order,
+    canvasWidth: BLANK_CANVAS.width,
+    canvasHeight: BLANK_CANVAS.height,
     floorImage: null,
-    imageWidth: null,
-    imageHeight: null,
+    floorImageWidth: null,
+    floorImageHeight: null,
+    floorTransform: null,
     seatScale: 1,
   };
 }
@@ -249,6 +274,7 @@ export function createSeat(
     name: '',
     memberId: null,
     type: 'fixed',
+    division: '',
     ...attrs,
   };
 }
@@ -256,6 +282,16 @@ export function createSeat(
 // 席サイズ倍率の有効範囲 (席ユニット単位)
 export const SEAT_SIZE_MIN = 0.5;
 export const SEAT_SIZE_MAX = 6;
+
+// ゾーンラベルのフォントスケールの有効範囲
+export const ZONE_FONT_SCALE_MIN = 0.5;
+export const ZONE_FONT_SCALE_MAX = 3.0;
+
+export function clampZoneFontScale(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0
+    ? Math.min(ZONE_FONT_SCALE_MAX, Math.max(ZONE_FONT_SCALE_MIN, v))
+    : 1;
+}
 
 export function clampSeatSize(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
@@ -329,6 +365,7 @@ export function createZone(
     h: 0.15,
     color: 'blue',
     label: '',
+    fontScale: 1,
     ...rect,
     ...attrs,
   };
@@ -371,7 +408,7 @@ export const BLANK_CANVAS = { width: 1600, height: 1200 };
 export function normalizeData(raw: unknown): AppData {
   const r = raw as
     | (Omit<Partial<AppData>, 'locations' | 'members' | 'seats' | 'zones' | 'settings'> & {
-        locations?: Partial<Location>[];
+        locations?: any[];
         members?: Partial<Member>[];
         seats?: Partial<Seat>[];
         zones?: Partial<Zone>[];
@@ -393,20 +430,67 @@ export function normalizeData(raw: unknown): AppData {
             typeof d.label === 'string' && d.label.trim() !== ''
               ? d.label.trim()
               : (d.code as string).trim(),
+          // 後方互換: color は旧データに無い (2026-06-15 追加) → undefined のまま
+          ...(typeof d.color === 'string' && d.color ? { color: d.color } : {}),
         }))
     : null;
   return {
     version: r.version ?? DATA_VERSION,
-    locations: r.locations.map((l, i) => ({
-      id: l.id ?? uid(),
-      name: l.name ?? `拠点${i + 1}`,
-      order: l.order ?? i,
-      floorImage: l.floorImage ?? null,
-      imageWidth: l.imageWidth ?? null,
-      imageHeight: l.imageHeight ?? null,
-      // 後方互換: 席サイズ倍率 (旧データには無い)
-      seatScale: l.seatScale ?? 1,
-    })),
+    locations: r.locations.map((l: any, i: number) => {
+      const oldW = (l as any).imageWidth ?? null;
+      const oldH = (l as any).imageHeight ?? null;
+
+      let canvasWidth: number;
+      let canvasHeight: number;
+      if (typeof l.canvasWidth === 'number' && l.canvasWidth > 0) {
+        canvasWidth = l.canvasWidth;
+      } else if (typeof oldW === 'number' && oldW > 0) {
+        canvasWidth = oldW;
+      } else {
+        canvasWidth = BLANK_CANVAS.width;
+      }
+      if (typeof l.canvasHeight === 'number' && l.canvasHeight > 0) {
+        canvasHeight = l.canvasHeight;
+      } else if (typeof oldH === 'number' && oldH > 0) {
+        canvasHeight = oldH;
+      } else {
+        canvasHeight = BLANK_CANVAS.height;
+      }
+
+      let floorTransform: { x: number; y: number; scale: number } | null;
+      if (l.floorTransform != null && typeof l.floorTransform === 'object') {
+        floorTransform = {
+          x: typeof l.floorTransform.x === 'number' ? l.floorTransform.x : 0,
+          y: typeof l.floorTransform.y === 'number' ? l.floorTransform.y : 0,
+          scale: typeof l.floorTransform.scale === 'number' ? l.floorTransform.scale : 1,
+        };
+      } else if (l.floorImage) {
+        floorTransform = { x: 0, y: 0, scale: 1 };
+      } else {
+        floorTransform = null;
+      }
+
+      const floorImageWidth: number | null =
+        typeof l.floorImageWidth === 'number' ? l.floorImageWidth :
+        (floorTransform && typeof oldW === 'number' ? oldW : null);
+      const floorImageHeight: number | null =
+        typeof l.floorImageHeight === 'number' ? l.floorImageHeight :
+        (floorTransform && typeof oldH === 'number' ? oldH : null);
+
+      return {
+        id: l.id ?? uid(),
+        name: l.name ?? `拠点${i + 1}`,
+        order: l.order ?? i,
+        canvasWidth,
+        canvasHeight,
+        floorImage: l.floorImage ?? null,
+        floorImageWidth,
+        floorImageHeight,
+        floorTransform,
+        // 後方互換: 席サイズ倍率 (旧データには無い)
+        seatScale: l.seatScale ?? 1,
+      };
+    }),
     members: (r.members ?? []).map((m) =>
       // 後方互換: 事業部 (division)・メール (email)・在籍状態 (status) は
       // 旧データに無い (2026-06-12 追加) → ''/'active'
@@ -431,6 +515,8 @@ export function normalizeData(raw: unknown): AppData {
       name: typeof s.name === 'string' ? s.name : '',
       memberId: s.memberId ?? null,
       type: s.type ?? 'fixed',
+      // 後方互換: 事業部直接設定 (旧データには無い)
+      division: typeof s.division === 'string' ? s.division : '',
     })),
     // 後方互換: エリア (ゾーン) は旧データに無い (2026-06-11 追加)
     zones: (r.zones ?? []).map((z) => ({
@@ -442,6 +528,8 @@ export function normalizeData(raw: unknown): AppData {
       h: typeof z.h === 'number' ? z.h : 0.15,
       color: typeof z.color === 'string' && z.color ? z.color : 'blue',
       label: typeof z.label === 'string' ? z.label : '',
+      // 後方互換: フォントスケール (旧データには無い)
+      fontScale: typeof z.fontScale === 'number' ? z.fontScale : 1,
     })),
     settings: { divisions: rawDivisions ?? createDefaultSettings().divisions },
     updatedAt: r.updatedAt ?? new Date().toISOString(),

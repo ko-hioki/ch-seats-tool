@@ -118,13 +118,33 @@ export default function SeatDetailPopover({
             </Button>
           </div>
         </div>
-      ) : seat.name ? (
-        // 直接入力の名前のみの席: 名前だけを表示 (プロフィール編集は台帳紐付け席のみ)
-        <div className="space-y-1 py-1">
-          <div className="text-base font-bold">{seat.name}</div>
-          <p className="text-xs text-muted-foreground">
-            台帳未登録の名前です。編集モードの「台帳と紐付け」でプロフィールを追加できます。
-          </p>
+      ) : seat.name || seat.division ? (
+        // 直接入力の名前 or 事業部直接設定の席
+        <div className="space-y-1.5 py-1">
+          {seat.name ? (
+            <div className="text-base font-bold">{seat.name}</div>
+          ) : null}
+          {seat.division ? (
+            <div>
+              {(() => {
+                const divName = divisions.find((d) => d.code === seat.division)?.label ?? seat.division;
+                const dColor = departmentColor(colorMap, seat.division);
+                return (
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium"
+                    style={{ background: dColor.bg, color: dColor.text, border: `1px solid ${dColor.border}` }}
+                  >
+                    {divName}
+                  </span>
+                );
+              })()}
+            </div>
+          ) : null}
+          {seat.name ? (
+            <p className="text-xs text-muted-foreground">
+              台帳未登録の名前です。編集モードの「台帳と紐付け」でプロフィールを追加できます。
+            </p>
+          ) : null}
         </div>
       ) : (
         <p className="py-2 text-sm text-muted-foreground">空席です</p>

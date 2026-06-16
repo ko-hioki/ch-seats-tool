@@ -90,10 +90,18 @@
 - **メンバーの事業部 (division) フィールド追加（2026-06-12）**: 従来の「所属 (department)」UI を「事業部」(固定リストのプルダウン・コード保存/名称表示・未設定可) と「部署」(課・チームなどの自由入力。旧 department をそのまま継続=後方互換) に分離。事業部マスタは `lib/model.ts` の `DIVISIONS`（23 件）。色分けキーは「事業部 (設定時) → 部署 (フォールバック)」(`memberColorKey`)。検索は事業部の名称・コード・部署のいずれでもヒット。CSV 取り込みに「事業部」列マッピングを追加（コード完全一致 → 名称完全一致 → 名称部分一致が一意のときのみ解決。解決不可なら空のまま）。MemberEditDialog / ProfileEditDialog に事業部 Select + 部署入力、MemberPanel / SeatDetailPopover / MemberLinkDialog は「事業部名称 / 部署」を併記表示
 - **机間の余白調整（2026-06-12）**: 複数選択ツールバーに「間隔 − / ＋」を追加。選択全体の中心から各席までの距離を 10% ずつ拡縮（連打は Undo 1 ステップに集約）
 - **改修 2026-06-12 (v2)**: 事業部デフォルトリスト削除 / MemberPanel ボタン統合 / メール必須化 / ラベル簡潔化
+- **エリア文字サイズ変更・改行対応・コピペ / 席への事業部直接設定（2026-06-12）**:
+  - `Zone.fontScale`（0.5〜3.0、デフォルト 1）追加。ZoneToolbar に「文字 − / ＋」ボタン（0.25 刻み、coalesceKey で連打 Undo 1 回に集約）。FloorMap のゾーンラベル描画に fontScale 反映
+  - ゾーンラベルの複数行対応: インライン編集を textarea ベースに変更（Enter で改行 / Cmd/Ctrl+Enter または blur で確定 / Esc キャンセル。IME 対応）。ZoneToolbar のラベル入力も textarea に。表示は whitespace-pre-line で改行反映。`Zone.label` に \n を許容
+  - エリアのコピー&ペースト: 選択中ゾーンを Cmd/Ctrl+C でコピー・V で貼り付け（席クリップボードと単一クリップボードで共存）。貼り付け位置はカーソル基準（なければオフセット）。label/color/w/h/fontScale 引き継ぎ。貼り付け後は新ゾーンを選択状態に。Undo 1 回で取り消し
+  - `Seat.division`（事業部コード直接設定、'' = 未設定）追加。SeatToolbar の単一/複数選択に「事業部」Select を追加（複数選択時は一括適用）。色の解決順: メンバー紐付き席 → seat.division 設定済み → 空席スタイル。コピペ・複製・テンプレートで division を引き継ぎ。検索で seat.division（コード・名称）もヒット。閲覧モードポップオーバーでメンバーなし・division 設定ありの席に事業部バッジを表示
   - `DEFAULT_DIVISIONS`(特定組織固有のリスト)を削除。`createDefaultSettings()` の divisions は空配列に変更。旧データで settings が無い場合も空配列で補完(組織固有情報はコードに持たず、すべて設定から投入する)
   - MemberPanel のボタンを「追加」「名簿から取り込み / 同期」の2つに統合。CsvImportDialog は削除し、その機能は RosterSyncDialog に吸収（email列なし→一括追加モード、email列あり→差分同期）
   - MemberEditDialog でメールアドレスを必須化。メール空のメンバーは台帳パネルで警告アイコン表示
   - フォームラベルの「(補足)」形式を削除し簡潔化
+- **席インライン入力のコンボボックス化（2026-06-12）**: 席ダブルクリック/Enter で開くインライン名前入力に台帳候補ドロップダウンを追加。`InlineNameInput` が `candidates: MemberCandidate[]` を受け取り入力テキストで本名・あだ名の部分一致絞り込みを行う。空入力時は未割り当てメンバーを優先して最大 8 件表示。各候補に事業部色ドット・「あだ名（本名）」表示・他席割り当て済みの場合は「移動」バッジを表示。キーボード操作: ↓/↑ で候補ハイライト移動 → Enter で台帳紐付け選択、ハイライトなし Enter は直書き確定。クリック選択可。`onMouseDown` の `preventDefault` でクリック時の blur 早期確定を防止。配置モード (tool='place') および流し込みモード中は候補ドロップダウン非表示（従来のシンプル入力）。台帳メンバーが 0 人のときも非表示。メンバー選択時は既存の `dropMemberOnSeat`（移動・スワップ込み）と同挙動で紐付け、`seat.name` を '' に（台帳表示が優先）。`FloorMap` に `inlineMembers?: Member[]` / `onSelectMemberForSeat?` を追加。`App.tsx` で `data?.members` と `handleSelectMemberForSeat` を配線（台帳パネルが閉じていても動作）
+- **事業部ごとの色指定（2026-06-15）**: `Division` に `color?: string` を追加（hex 文字列 '#rrggbb' または NAMED_PALETTE のキー 'blue'等。省略時は自動割り当て）。設定ダイアログの事業部リスト各行に色スウォッチボタンを追加し、36色プリセットグリッド（色相×3段階）＋12色淡色プリセット＋`<input type="color">` によるカスタム任意色＋「自動」でインタラクティブに選択可能。`lib/colors.ts` に `NAMED_PALETTE`・`paletteColorByKey`・`isHexColor`・`colorFromHex`・`resolveColorValue`・`buildDepartmentColorMap(keys, overrides?)` を追加。hex 指定時は bg=白15%ブレンド淡色・border=指定hex・text=HSL明度25%暗色として導出。`App.tsx` の colorMap useMemo で divisions.color (hex/キー両対応) を overrides として渡す。既存データ（color 未指定またはパレットキー）は自動割り当て順・見た目が変わらず後方互換を維持。カラーピッカーポップオーバーの背景を `bg-white` に修正（Tailwind v4 テーマに popover 変数が無く透過していた問題を修正）。
+- **検索オートコンプリート + 席へのフォーカス移動（2026-06-15）**: 検索ボックスにフォーカス+入力でドロップダウン候補を最大 10 件表示（全拠点の席を対象。マッチ対象は台帳メンバーの本名・あだ名・事業部コード/名称・部署、直書き名、席ラベル）。同名が複数席あれば席ごとに個別エントリとして列挙し「拠点名 — 席ラベル」を副次表示。各候補に事業部色ドットを表示（既存 colorMap を流用）。キーボード操作: ↓/↑ で候補移動・Enter で選択・Esc で閉じる。マウスクリックでも選択可。選択時は別拠点の席なら拠点を切り替えてから（setTimeout 1 tick で切替後の次フレームに）フォーカス命令を発行。`FloorMap` に `focusSeatId?: string | null` / `focusNonce?: number` prop を追加。focusNonce が変わるたびに「対象席が画面中央に来るよう tx/ty/scale を更新 (目標スケール 1.2、既にそれ以上ズームしていれば維持)」を実行。フォーカス後は席に黄色アウトラインの点滅パルスアニメーション (`seat-focus-pulse` keyframes) を 1.8 秒間（0.6 秒×3 回）表示して位置を視認しやすくする。検索ドロップダウンは候補選択後に閉じる（検索文字はそのまま残す）。既存のハイライト/ディム挙動は維持。検索ボックスに ✕ クリアボタンを追加（入力中のみ表示）。閲覧・編集モード両方で動作。
 
 ## 機能一覧
 
@@ -164,12 +172,28 @@ AppData {
 }
 
 AppSettings {
-  divisions: { code, label }[]  // 事業部リスト。デフォルトは空配列 []。設定ダイアログで編集可能。
-                                // セッションデータに保存するため、組織変更で zip 再アップは不要
+  divisions: { code, label, color? }[]  // 事業部リスト。デフォルトは空配列 []。設定ダイアログで編集可能。
+                                        // セッションデータに保存するため、組織変更で zip 再アップは不要
+                                        // color: hex 文字列 ('#rrggbb') または NAMED_PALETTE のキー ('blue','green' 等)。省略時は自動割り当て。
+                                        //   hex の場合: bg=白と15%ブレンドした淡色、border=指定hex、text=HSL明度25%の暗色 (colorFromHex)
+                                        //   パレットキーの場合: 従来どおり (後方互換)
+                                        // (2026-06-15 追加・拡張: hex 任意色指定および36色プリセットグリッドUIに対応)
 }
 
-Location { id, name, order, floorImage: dataURL | null, imageWidth, imageHeight, seatScale }
-  // seatScale: 席表示倍率 0.4〜2.0 (2026-06-11 追加。欠損時は 1 として正規化)
+Location {
+  id, name, order,
+  canvasWidth: number,       // キャンバス(背景レイヤー)の幅。座席相対座標(0-1)の基準 (旧: imageWidth。後方互換あり)
+  canvasHeight: number,      // キャンバスの高さ
+  floorImage: dataURL | null,  // フロア図面。null=無地キャンバス
+  floorImageWidth: number | null,   // 図面の元ピクセル幅 (アスペクト比保持用)
+  floorImageHeight: number | null,  // 図面の元ピクセル高さ
+  floorTransform: { x, y, scale } | null,
+    // キャンバス上の図面配置。null=図面なし。
+    // x,y: 図面左上のキャンバス相対座標(0-1基準)
+    // scale: 図面をcanvasWidthに対してどの倍率で表示するか (1=canvasWidthに幅が一致)
+  seatScale: number  // 席表示倍率 0.4〜2.0 (2026-06-11 追加。欠損時は 1 として正規化)
+}
+  // 後方互換: 旧フォーマットの imageWidth/imageHeight は canvasWidth/canvasHeight にマッピング
 
 Member {
   id,
@@ -193,14 +217,17 @@ Seat {
   label,           // 席番号など(任意)
   name: string | null,      // 直書きの名前(メンバー登録不要の主役フィールド)
   memberId: string | null,  // 台帳メンバーとの紐付け(任意)。紐付け時は表示名・色分け・詳細が台帳から解決される
-  type: "fixed" | "free" | "meeting" | "other"
+  type: "fixed" | "free" | "meeting" | "other",
+  division: string  // 事業部コード直接設定 ('' = 未設定。2026-06-12 追加。欠損時は '' として正規化)
+                    // メンバー紐付けなしでも事業部色で表示。色の解決順: メンバー紐付き → seat.division → 空席スタイル
 }
 
 Zone {
   id, locationId,
   x, y, w, h,      // 図面上の相対座標・サイズ (0-1)
   color,           // プリセットカラーのキー (lib/colors.js の ZONE_COLORS。12 色・半透明)
-  label            // エリア名 (例: "フレキシブルエリア")
+  label,           // エリア名 (例: "フレキシブルエリア")。\n による改行を許容 (2026-06-12 追加)
+  fontScale: number  // ラベルの文字サイズ倍率 0.5〜3.0 (デフォルト 1。2026-06-12 追加。欠損時は 1 として正規化)
 }
 ```
 
