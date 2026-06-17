@@ -17,6 +17,7 @@ import {
   LayoutGrid,
   Settings,
   Users,
+  HelpCircle,
   X,
 } from 'lucide-react';
 import { getSessionId, loadSession, saveSession, saveWithRetry } from '@/lib/datastore';
@@ -69,6 +70,7 @@ import MemberLinkDialog from '@/components/MemberLinkDialog';
 import NameFlowDialog, { type FlowEntry } from '@/components/NameFlowDialog';
 import SettingsDialog from '@/components/SettingsDialog';
 import RosterSyncDialog, { type RosterSyncResult } from '@/components/RosterSyncDialog';
+import HelpDialog from '@/components/HelpDialog';
 
 const POLL_INTERVAL_MS = 30000;
 const UNDO_LIMIT = 50;
@@ -192,6 +194,8 @@ export default function App() {
   };
   const [locationId, setLocationId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  // 使い方ガイドの表示状態
+  const [helpOpen, setHelpOpen] = useState(false);
   // 検索サジェストドロップダウンの表示状態
   const [suggestOpen, setSuggestOpen] = useState(false);
   // 検索サジェストのキーボードハイライト index
@@ -1971,6 +1975,14 @@ export default function App() {
                 </div>
               ) : null}
             </div>
+            <Button
+              variant="outline"
+              size="iconSm"
+              onClick={() => setHelpOpen(true)}
+              title="使い方ガイド"
+            >
+              <HelpCircle />
+            </Button>
             {mode === 'view' ? (
               <>
                 <Button
@@ -2553,6 +2565,7 @@ export default function App() {
         onClose={() => setRosterSyncOpen(false)}
         onApply={applyRosterSync}
       />
+      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       {/* 保存競合ダイアログ */}
       <Dialog open={!!conflict}>

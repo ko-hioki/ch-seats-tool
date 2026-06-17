@@ -38,3 +38,6 @@ mise.toml
 **/next-env.d.ts
 
 **/storybook.log
+
+# build output (OSS: ビルド成果物はコミットしない)
+app/dist/

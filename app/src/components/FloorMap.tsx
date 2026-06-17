@@ -115,12 +115,23 @@ function SeatNode({
   // 席ごとのサイズ倍率 (w/h は席ユニット単位。旧データは undefined → 1)
   const cellW = Math.round(seatW * (seat.w ?? 1));
   const cellH = Math.round(seatH * (seat.h ?? 1));
-  // 文字数に応じて自動縮小し、4〜5文字の姓名でも truncate しないようにする (実セルサイズ基準)
+  // 名前は席の回転にかかわらず常に水平表示する (counterRotate で打ち消す)。
+  // 90°/270° に近い向きでは枠の幅と高さが画面上で入れ替わるため、
+  // 文字サイズ計算に使う有効幅/高さも 90° 単位に丸めた向きで決める。
+  const rot = ((((seat.rotation ?? 0) % 360) + 360) % 360);
+  const swapWH = (rot >= 45 && rot < 135) || (rot >= 225 && rot < 315);
+  const effW = swapWH ? cellH : cellW;
+  const effH = swapWH ? cellW : cellH;
+  // 文字数に応じて自動縮小し、4〜5文字の姓名でも truncate しないようにする (有効幅基準)
   const fontSize = Math.max(
     8,
-    Math.min(cellW * 0.17, cellH * 0.34, ((cellW - 6) * 1.7) / Math.max(1, displayName.length))
+    Math.min(effW * 0.17, effH * 0.34, ((effW - 6) * 1.7) / Math.max(1, displayName.length))
   );
-  const labelSize = Math.max(8, Math.round(Math.min(cellW * 0.12, cellH * 0.2)));
+  const labelSize = Math.max(8, Math.round(Math.min(effW * 0.12, effH * 0.2)));
+  // 名前テキストを正立させるための逆回転。マーカーや枠は回転に乗せたまま。
+  const counterRotate = `rotate(${-(seat.rotation ?? 0)}deg)`;
+  // 座る側マーカーの厚み (机の向きを示す底辺の帯)
+  const seatMarkerH = Math.max(3, Math.round(Math.min(cellH * 0.16, cellW * 0.16)));
 
   return (
     <div
@@ -152,10 +163,15 @@ function SeatNode({
           style={{ animation: 'seat-focus-pulse 0.6s ease-out 3', outline: '3px solid #facc15', outlineOffset: '2px' }}
         />
       ) : null}
+      {/* 座る側マーカー: 机の底辺の帯。席の回転に乗るので机の向き (座る方向) を示す */}
+      <div
+        className="pointer-events-none absolute bottom-0 left-0 right-0"
+        style={{ height: seatMarkerH, background: style.borderColor, opacity: 0.85 }}
+      />
       {seat.label ? (
         <div
           className="leading-none opacity-70 pointer-events-none max-w-full truncate px-0.5"
-          style={{ fontSize: labelSize, color: style.color ?? '#64748b' }}
+          style={{ fontSize: labelSize, color: style.color ?? '#64748b', transform: counterRotate }}
         >
           {seat.label}
         </div>
@@ -165,7 +181,7 @@ function SeatNode({
           'font-bold leading-tight text-center pointer-events-none max-w-full truncate px-0.5',
           retired && 'line-through'
         )}
-        style={{ fontSize, color: style.color }}
+        style={{ fontSize, color: style.color, transform: counterRotate }}
         title={retired ? '退職メンバーが紐付いたままの席です' : undefined}
       >
         {displayName || (seat.type === 'meeting' ? '会議席' : '空席')}
@@ -175,7 +191,7 @@ function SeatNode({
           src={member.icon}
           alt=""
           className="rounded-full pointer-events-none"
-          style={{ width: cellH * 0.32, height: cellH * 0.32 }}
+          style={{ width: cellH * 0.32, height: cellH * 0.32, transform: counterRotate }}
           draggable={false}
         />
       ) : null}
